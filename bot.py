@@ -211,6 +211,7 @@ def handle_update(upd: dict):
 
     if utype == "message_created":
         msg     = upd.get("message", {})
+        log.info(f"Full message: {msg}")
         chat_id = msg.get("recipient", {}).get("chat_id")
         user_id = msg.get("sender", {}).get("user_id", 0)
         text    = msg.get("body", {}).get("text", "")
