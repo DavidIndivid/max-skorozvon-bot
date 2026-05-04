@@ -271,19 +271,18 @@ def polling_loop():
             if marker:
                 params["marker"] = marker
             resp = _max("GET", "/updates", params=params)
+            log.info(f"Poll resp keys={list(resp.keys())} marker={resp.get('marker')} updates={len(resp.get('updates') or [])}")
             marker = resp.get("marker", marker)
-            updates = resp.get("updates", [])
-            if updates:
-                log.info(f"Polling: got {len(updates)} updates")
-                for upd in updates:
-                    handle_update(upd)
+            updates = resp.get("updates") or []
+            for upd in updates:
+                handle_update(upd)
         except requests.exceptions.Timeout:
-            pass
+            log.info("Poll timeout (normal)")
         except requests.exceptions.ConnectionError as e:
             log.warning(f"Polling connection error: {e}")
             time.sleep(10)
         except Exception as e:
-            log.error(f"Polling error: {e}")
+            log.error(f"Polling error: {e}", exc_info=True)
             time.sleep(5)
 
 if __name__ == "__main__":
