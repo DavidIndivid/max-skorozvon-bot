@@ -84,12 +84,17 @@ def _max(method: str, path: str, **kw):
     params = kw.pop("params", {})
     headers = kw.pop("headers", {})
     headers["Authorization"] = f"Bearer {TOKEN}"
+    params["access_token"] = TOKEN  # deprecated but some endpoints may need it
     r = requests.request(
         method, f"{MAX_BASE}{path}", params=params, headers=headers, timeout=40, **kw
     )
     try:
-        return r.json()
+        data = r.json()
+        if r.status_code != 200:
+            log.warning(f"API {method} {path} → {r.status_code}: {data}")
+        return data
     except Exception:
+        log.warning(f"API {method} {path} → {r.status_code}: {r.text[:200]}")
         return {}
 
 def send(chat_id: int, text: str, buttons=None):
@@ -227,7 +232,13 @@ def main():
             resp   = _max("GET", "/updates", params=params)
             marker = resp.get("marker", marker)
 
-            for upd in resp.get("updates", []):
+            updates = resp.get("updates", [])
+            if updates:
+                log.info(f"Got {len(updates)} updates")
+            elif "code" in resp:
+                log.warning(f"Updates error: {resp}")
+
+            for upd in updates:
                 utype = upd.get("update_type", "")
 
                 if utype == "message_created":
