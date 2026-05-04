@@ -84,7 +84,6 @@ def _max(method: str, path: str, **kw):
     params = kw.pop("params", {})
     headers = kw.pop("headers", {})
     headers["Authorization"] = f"Bearer {TOKEN}"
-    params["access_token"] = TOKEN  # deprecated but some endpoints may need it
     r = requests.request(
         method, f"{MAX_BASE}{path}", params=params, headers=headers, timeout=40, **kw
     )
