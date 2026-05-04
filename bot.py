@@ -83,7 +83,7 @@ def get_project_stats(pid: int) -> dict:
 def _max(method: str, path: str, **kw):
     params = kw.pop("params", {})
     headers = kw.pop("headers", {})
-    headers["Authorization"] = f"Bearer {TOKEN}"
+    headers["Authorization"] = TOKEN
     r = requests.request(
         method, f"{MAX_BASE}{path}", params=params, headers=headers, timeout=40, **kw
     )
@@ -218,6 +218,7 @@ def on_callback(chat_id: int, user_id: int, callback_id: str, payload: str):
 
 # ── Main polling loop ──────────────────────────────────────────────────────────
 def main():
+    log.info(f"Token prefix: {TOKEN[:8]}...")
     me = _max("GET", "/me")
     log.info(f"Bot started: {me}")
 
