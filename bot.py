@@ -254,10 +254,70 @@ def make_handler():
 
     return Handler
 
+def register_webhook():
+    """Регистрируем webhook URL в MAX API."""
+    webhook_url = os.environ.get("WEBHOOK_URL", "https://max-skorozvon-bot.onrender.com")
+    log.info(f"Registering webhook: {webhook_url}")
+
+    # Список существующих подписок
+    try:
+        subs = _max("GET", "/subscriptions")
+        log.info(f"Current subscriptions: {subs}")
+        for s in subs.get("subscriptions", []) or []:
+            sub_url = s.get("url", "")
+            if sub_url and sub_url != webhook_url:
+                log.info(f"Removing old subscription: {sub_url}")
+                _max("DELETE", "/subscriptions", params={"url": sub_url})
+    except Exception as e:
+        log.warning(f"Failed to list subscriptions: {e}")
+
+    # Регистрируем новый webhook
+    try:
+        result = _max("POST", "/subscriptions", json={
+            "url": webhook_url,
+            "update_types": ["message_created", "message_callback"],
+        })
+        log.info(f"Webhook registration result: {result}")
+    except Exception as e:
+        log.error(f"Webhook registration failed: {e}")
+
+
+def polling_loop():
+    """Fallback на long-polling если webhook не работает."""
+    log.info("Starting polling loop as fallback")
+    marker = None
+    while True:
+        try:
+            params: dict = {"timeout": 30}
+            if marker:
+                params["marker"] = marker
+            resp = _max("GET", "/updates", params=params)
+            marker = resp.get("marker", marker)
+            updates = resp.get("updates", [])
+            if updates:
+                log.info(f"Polling: got {len(updates)} updates")
+                for upd in updates:
+                    handle_update(upd)
+        except requests.exceptions.Timeout:
+            pass
+        except requests.exceptions.ConnectionError as e:
+            log.warning(f"Polling connection error: {e}")
+            time.sleep(10)
+        except Exception as e:
+            log.error(f"Polling error: {e}")
+            time.sleep(5)
+
+
 def main():
+    import threading
     log.info(f"Token prefix: {TOKEN[:8]}...")
     me = _max("GET", "/me")
     log.info(f"Bot info: {me}")
+
+    register_webhook()
+
+    # Запускаем polling в фоне как страховку
+    threading.Thread(target=polling_loop, daemon=True).start()
 
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), make_handler())
