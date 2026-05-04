@@ -238,16 +238,18 @@ def make_handler():
 
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length)
+            body = self.rfile.read(length) if length else self.rfile.read()
+            log.info(f"POST {self.path} headers={dict(self.headers)} body={body[:500]}")
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"ok")
-            try:
-                upd = json.loads(body)
-                log.info(f"Webhook: {upd.get('update_type')} raw={body[:200]}")
-                handle_update(upd)
-            except Exception as e:
-                log.error(f"Webhook error: {e}, body={body[:200]}")
+            if body:
+                try:
+                    upd = json.loads(body)
+                    log.info(f"Webhook update_type={upd.get('update_type')}")
+                    handle_update(upd)
+                except Exception as e:
+                    log.error(f"Webhook parse error: {e}")
 
         def log_message(self, *args):
             pass
