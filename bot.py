@@ -82,9 +82,10 @@ def get_project_stats(pid: int) -> dict:
 # ── Max Bot API ────────────────────────────────────────────────────────────────
 def _max(method: str, path: str, **kw):
     params = kw.pop("params", {})
-    params["access_token"] = TOKEN
+    headers = kw.pop("headers", {})
+    headers["Authorization"] = f"Bearer {TOKEN}"
     r = requests.request(
-        method, f"{MAX_BASE}{path}", params=params, timeout=40, **kw
+        method, f"{MAX_BASE}{path}", params=params, headers=headers, timeout=40, **kw
     )
     try:
         return r.json()
