@@ -92,16 +92,21 @@ def _max(method: str, path: str, **kw):
         log.warning(f"API {method} {path} → {r.status_code}: {r.text[:200]}")
         return {}
 
-def send(chat_id: int, text: str, buttons=None, chat_type: str = "dialog"):
+def send(chat_id: int, text: str, buttons=None, chat_type: str = "dialog",
+         user_id: int = None):
     body: dict = {"text": text}
     if buttons:
         body["attachments"] = [{
             "type": "inline_keyboard",
             "payload": {"buttons": buttons},
         }]
-    recipient = {"chat_id": chat_id, "chat_type": chat_type}
-    result = _max("POST", "/messages", json={"recipient": recipient, "body": body})
-    log.info(f"Send to {recipient} → {result}")
+    # MAX API (TamTam-style): recipient as query param, body contains only content
+    if user_id:
+        params = {"user_id": user_id}
+    else:
+        params = {"chat_id": chat_id}
+    result = _max("POST", "/messages", params=params, json=body)
+    log.info(f"Send params={params} → {result}")
     return result
 
 def notify_cb(callback_id: str, text: str):
@@ -158,11 +163,11 @@ def _build_main_menu():
 # ── Event handlers ─────────────────────────────────────────────────────────────
 def on_message(chat_id: int, chat_type: str, user_id: int, text: str):
     if ALLOWED and user_id not in ALLOWED:
-        send(chat_id, "⛔ Нет доступа.", chat_type=chat_type)
+        send(chat_id, "⛔ Нет доступа.", user_id=user_id)
         return
     log.info(f"Message from user_id={user_id} chat_id={chat_id}: {text!r}")
     txt, btns = _build_main_menu()
-    send(chat_id, txt, btns, chat_type=chat_type)
+    send(chat_id, txt, btns, user_id=user_id)
 
 def on_callback(chat_id: int, chat_type: str, user_id: int, callback_id: str, payload: str):
     if ALLOWED and user_id not in ALLOWED:
@@ -173,18 +178,18 @@ def on_callback(chat_id: int, chat_type: str, user_id: int, callback_id: str, pa
 
     if payload == "projects":
         txt, btns = _build_projects_view()
-        send(chat_id, txt, btns, chat_type=chat_type)
+        send(chat_id, txt, btns, user_id=user_id)
         return
 
     if payload == "main_menu":
         txt, btns = _build_main_menu()
-        send(chat_id, txt, btns, chat_type=chat_type)
+        send(chat_id, txt, btns, user_id=user_id)
         return
 
     if payload.startswith("stats_"):
         pid = int(payload.split("_", 1)[1])
         pname = next((p["name"] for p in PROJECTS if p["id"] == pid), str(pid))
-        send(chat_id, _build_stats_view(pid, pname), chat_type=chat_type)
+        send(chat_id, _build_stats_view(pid, pname), user_id=user_id)
         return
 
     if payload.startswith("start_") or payload.startswith("stop_"):
@@ -202,7 +207,7 @@ def on_callback(chat_id: int, chat_type: str, user_id: int, callback_id: str, pa
             return
         time.sleep(1)
         txt, btns = _build_projects_view()
-        send(chat_id, txt, btns, chat_type=chat_type)
+        send(chat_id, txt, btns, user_id=user_id)
 
 # ── Process single update ───────────────────────────────────────────────────────
 def handle_update(upd: dict):
