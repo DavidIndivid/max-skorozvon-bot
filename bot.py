@@ -256,5 +256,21 @@ def main():
             time.sleep(5)
 
 
+def _run_health_server():
+    port = int(os.environ.get("PORT", 8080))
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):
+            pass  # не спамим в лог
+
+    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+
+
 if __name__ == "__main__":
+    threading.Thread(target=_run_health_server, daemon=True).start()
     main()
