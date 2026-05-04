@@ -169,7 +169,7 @@ def on_message(chat_id: int, chat_type: str, user_id: int, text: str):
     txt, btns = _build_main_menu()
     send(chat_id, txt, btns, user_id=user_id)
 
-def on_callback(chat_id: int, chat_type: str, user_id: int, callback_id: str, payload: str):
+def on_callback(user_id: int, callback_id: str, payload: str):
     if ALLOWED and user_id not in ALLOWED:
         notify_cb(callback_id, "⛔ Нет доступа")
         return
@@ -178,18 +178,18 @@ def on_callback(chat_id: int, chat_type: str, user_id: int, callback_id: str, pa
 
     if payload == "projects":
         txt, btns = _build_projects_view()
-        send(chat_id, txt, btns, user_id=user_id)
+        send(None, txt, btns, user_id=user_id)
         return
 
     if payload == "main_menu":
         txt, btns = _build_main_menu()
-        send(chat_id, txt, btns, user_id=user_id)
+        send(None, txt, btns, user_id=user_id)
         return
 
     if payload.startswith("stats_"):
         pid = int(payload.split("_", 1)[1])
         pname = next((p["name"] for p in PROJECTS if p["id"] == pid), str(pid))
-        send(chat_id, _build_stats_view(pid, pname), user_id=user_id)
+        send(None, _build_stats_view(pid, pname), user_id=user_id)
         return
 
     if payload.startswith("start_") or payload.startswith("stop_"):
@@ -207,7 +207,7 @@ def on_callback(chat_id: int, chat_type: str, user_id: int, callback_id: str, pa
             return
         time.sleep(1)
         txt, btns = _build_projects_view()
-        send(chat_id, txt, btns, user_id=user_id)
+        send(None, txt, btns, user_id=user_id)
 
 # ── Process single update ───────────────────────────────────────────────────────
 def handle_update(upd: dict):
@@ -226,18 +226,12 @@ def handle_update(upd: dict):
 
     elif utype == "message_callback":
         cb          = upd.get("callback", {})
-        log.info(f"Full callback: {cb}")
-        cb_recip    = cb.get("message", {}).get("recipient", {})
-        chat_id     = cb_recip.get("chat_id")
-        chat_type   = cb_recip.get("chat_type", "dialog")
         user_id     = cb.get("user", {}).get("user_id", 0)
         callback_id = cb.get("callback_id", "")
         payload     = cb.get("payload", "")
-        log.info(f"Callback: chat_id={chat_id} user_id={user_id} payload={payload!r}")
-        if chat_id:
-            on_callback(chat_id, chat_type, user_id, callback_id, payload)
-        else:
-            log.warning(f"Callback: no chat_id found in {cb_recip}")
+        log.info(f"Callback: user_id={user_id} payload={payload!r}")
+        if user_id:
+            on_callback(user_id, callback_id, payload)
 
     else:
         log.info(f"Unknown update type: {utype}, full: {upd}")
