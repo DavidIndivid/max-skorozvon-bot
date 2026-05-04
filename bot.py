@@ -296,12 +296,12 @@ def polling_loop():
             resp = _max("GET", "/updates", params=params)
             marker = resp.get("marker", marker)
             updates = resp.get("updates") or []
-            if updates:
-                log.info(f"Got {len(updates)} update(s)")
+            log.info(f"Poll: marker={marker} updates={len(updates)}")
             for upd in updates:
                 handle_update(upd)
         except requests.exceptions.Timeout:
-            pass
+            log.info("Poll timeout, retrying")
+            time.sleep(1)
         except requests.exceptions.ConnectionError as e:
             log.warning(f"Connection error: {e}")
             time.sleep(10)
