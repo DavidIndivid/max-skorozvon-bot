@@ -157,12 +157,7 @@ def notify_cb(callback_id: str, text: str):
         pass
 
 # ── UI builders ────────────────────────────────────────────────────────────────
-def _build_projects_view():
-    try:
-        states = get_projects_state()
-    except Exception as e:
-        return f"❌ Ошибка Скорозвона:\n{e}", None
-
+def _render_projects(states: dict):
     lines = ["📋 Проекты Скорозвон:\n"]
     buttons = []
     for p in PROJECTS:
@@ -178,9 +173,23 @@ def _build_projects_view():
             btn_pay  = f"start_{p['id']}"
         lines.append(f"  {icon} {p['name']} — {state_ru}")
         buttons.append([{"type": "callback", "text": btn_text, "payload": btn_pay}])
-
     buttons.append([{"type": "callback", "text": "🔄 Обновить", "payload": "projects"}])
     return "\n".join(lines), buttons
+
+def _build_projects_view():
+    try:
+        states = get_projects_state()
+    except Exception as e:
+        return f"❌ Ошибка Скорозвона:\n{e}", None
+    return _render_projects(states)
+
+def _build_projects_view_with_override(override_pid: int, override_state: str):
+    try:
+        states = get_projects_state()
+    except Exception as e:
+        return f"❌ Ошибка Скорозвона:\n{e}", None
+    states[override_pid] = override_state
+    return _render_projects(states)
 
 def _build_main_menu():
     return (
@@ -227,8 +236,9 @@ def on_callback(user_id: int, callback_id: str, payload: str):
             notify_cb(callback_id, f"❌ Ошибка: {e}")
             log.error(f"project_action failed: {e}")
             return
-        time.sleep(1)
-        txt, btns = _build_projects_view()
+        # Оптимистичное обновление: показываем ожидаемый статус сразу
+        new_state = "active" if action == "start" else "paused"
+        txt, btns = _build_projects_view_with_override(pid, new_state)
         send_or_edit(user_id, txt, btns)
 
 # ── Process single update ───────────────────────────────────────────────────────
