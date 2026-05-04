@@ -44,6 +44,9 @@ STATE_RU = {
 # last message id per user — для редактирования
 _last_mid: dict[int, str] = {}
 
+# дедупликация — не обрабатывать одно событие дважды
+_seen_updates: set[str] = set()
+
 # ── Skorozvon auth ─────────────────────────────────────────────────────────────
 _skoro_cache: dict = {}
 
@@ -95,7 +98,9 @@ def get_projects_state() -> dict:
     return states
 
 def project_action(pid: int, action: str):
-    return _skoro("POST", f"/call_projects/{pid}/{action}")
+    result = _skoro("POST", f"/call_projects/{pid}/{action}", json={})
+    log.info(f"project_action {action} {pid} → {result}")
+    return result
 
 # ── Max Bot API ────────────────────────────────────────────────────────────────
 def _max(method: str, path: str, **kw):
@@ -244,6 +249,21 @@ def on_callback(user_id: int, callback_id: str, payload: str):
 # ── Process single update ───────────────────────────────────────────────────────
 def handle_update(upd: dict):
     utype = upd.get("update_type", "")
+
+    # дедупликация
+    if utype == "message_created":
+        dedup_key = upd.get("message", {}).get("body", {}).get("mid", "")
+    elif utype == "message_callback":
+        dedup_key = upd.get("callback", {}).get("callback_id", "")
+    else:
+        dedup_key = ""
+    if dedup_key:
+        if dedup_key in _seen_updates:
+            log.warning(f"Duplicate update ignored: {dedup_key}")
+            return
+        _seen_updates.add(dedup_key)
+        if len(_seen_updates) > 500:
+            _seen_updates.clear()
 
     if utype == "message_created":
         msg       = upd.get("message", {})
