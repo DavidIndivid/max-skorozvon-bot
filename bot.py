@@ -64,14 +64,30 @@ def _skoro(method: str, path: str, **kw):
         method, f"{SKORO_BASE}/api/v2{path}", headers=h, timeout=15, **kw
     )
     r.raise_for_status()
-    if not r.content:
+    try:
+        return r.json()
+    except Exception:
         return {}
-    return r.json()
 
 def get_projects_state() -> dict:
-    data = _skoro("GET", "/call_projects").get("data", [])
-    log.info(f"Skorozvon projects raw: {[{'id': p.get('id'), 'state': p.get('state')} for p in data]}")
-    return {int(p["id"]): p.get("state", "unknown") for p in data}
+    states = {}
+    page = 1
+    target_ids = {p["id"] for p in PROJECTS}
+    while True:
+        resp = _skoro("GET", "/call_projects", params={"page": page, "per_page": 50})
+        data = resp.get("data", [])
+        if not data:
+            break
+        for p in data:
+            states[int(p["id"])] = p.get("state", "unknown")
+        if target_ids.issubset(states.keys()):
+            break
+        total = resp.get("meta", {}).get("total_pages", 1)
+        if page >= total:
+            break
+        page += 1
+    log.info(f"Skorozvon our projects: { {pid: states.get(pid) for pid in target_ids} }")
+    return states
 
 def project_action(pid: int, action: str):
     return _skoro("POST", f"/call_projects/{pid}/{action}")
