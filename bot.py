@@ -92,14 +92,14 @@ def _max(method: str, path: str, **kw):
         log.warning(f"API {method} {path} → {r.status_code}: {r.text[:200]}")
         return {}
 
-def send(chat_id: int, text: str, buttons=None):
+def send(chat_id: int, text: str, buttons=None, chat_type: str = "dialog"):
     body: dict = {"text": text}
     if buttons:
         body["attachments"] = [{
             "type": "inline_keyboard",
             "payload": {"buttons": buttons},
         }]
-    recipient = {"chat_id": chat_id}
+    recipient = {"chat_id": chat_id, "chat_type": chat_type}
     result = _max("POST", "/messages", json={"recipient": recipient, "body": body})
     log.info(f"Send to {recipient} → {result}")
     return result
@@ -156,15 +156,15 @@ def _build_main_menu():
     )
 
 # ── Event handlers ─────────────────────────────────────────────────────────────
-def on_message(chat_id: int, user_id: int, text: str):
+def on_message(chat_id: int, chat_type: str, user_id: int, text: str):
     if ALLOWED and user_id not in ALLOWED:
-        send(chat_id, "⛔ Нет доступа.")
+        send(chat_id, "⛔ Нет доступа.", chat_type=chat_type)
         return
     log.info(f"Message from user_id={user_id} chat_id={chat_id}: {text!r}")
     txt, btns = _build_main_menu()
-    send(chat_id, txt, btns)
+    send(chat_id, txt, btns, chat_type=chat_type)
 
-def on_callback(chat_id: int, user_id: int, callback_id: str, payload: str):
+def on_callback(chat_id: int, chat_type: str, user_id: int, callback_id: str, payload: str):
     if ALLOWED and user_id not in ALLOWED:
         notify_cb(callback_id, "⛔ Нет доступа")
         return
@@ -173,18 +173,18 @@ def on_callback(chat_id: int, user_id: int, callback_id: str, payload: str):
 
     if payload == "projects":
         txt, btns = _build_projects_view()
-        send(chat_id, txt, btns)
+        send(chat_id, txt, btns, chat_type=chat_type)
         return
 
     if payload == "main_menu":
         txt, btns = _build_main_menu()
-        send(chat_id, txt, btns)
+        send(chat_id, txt, btns, chat_type=chat_type)
         return
 
     if payload.startswith("stats_"):
         pid = int(payload.split("_", 1)[1])
         pname = next((p["name"] for p in PROJECTS if p["id"] == pid), str(pid))
-        send(chat_id, _build_stats_view(pid, pname))
+        send(chat_id, _build_stats_view(pid, pname), chat_type=chat_type)
         return
 
     if payload.startswith("start_") or payload.startswith("stop_"):
@@ -202,7 +202,7 @@ def on_callback(chat_id: int, user_id: int, callback_id: str, payload: str):
             return
         time.sleep(1)
         txt, btns = _build_projects_view()
-        send(chat_id, txt, btns)
+        send(chat_id, txt, btns, chat_type=chat_type)
 
 # ── Process single update ───────────────────────────────────────────────────────
 def handle_update(upd: dict):
@@ -210,22 +210,25 @@ def handle_update(upd: dict):
     log.info(f"Handling update_type={utype}")
 
     if utype == "message_created":
-        msg     = upd.get("message", {})
-        log.info(f"Full message: {msg}")
-        chat_id = msg.get("recipient", {}).get("chat_id")
-        user_id = msg.get("sender", {}).get("user_id", 0)
-        text    = msg.get("body", {}).get("text", "")
+        msg       = upd.get("message", {})
+        recipient = msg.get("recipient", {})
+        chat_id   = recipient.get("chat_id")
+        chat_type = recipient.get("chat_type", "dialog")
+        user_id   = msg.get("sender", {}).get("user_id", 0)
+        text      = msg.get("body", {}).get("text", "")
         if chat_id:
-            on_message(chat_id, user_id, text)
+            on_message(chat_id, chat_type, user_id, text)
 
     elif utype == "message_callback":
         cb          = upd.get("callback", {})
-        chat_id     = cb.get("message", {}).get("recipient", {}).get("chat_id")
+        cb_recip    = cb.get("message", {}).get("recipient", {})
+        chat_id     = cb_recip.get("chat_id")
+        chat_type   = cb_recip.get("chat_type", "dialog")
         user_id     = cb.get("user", {}).get("user_id", 0)
         callback_id = cb.get("callback_id", "")
         payload     = cb.get("payload", "")
         if chat_id:
-            on_callback(chat_id, user_id, callback_id, payload)
+            on_callback(chat_id, chat_type, user_id, callback_id, payload)
 
     else:
         log.info(f"Unknown update type: {utype}, full: {upd}")
