@@ -79,7 +79,10 @@ def get_projects_state() -> dict:
         if not data:
             break
         for p in data:
-            states[int(p["id"])] = p.get("state", "unknown")
+            pid = int(p["id"])
+            states[pid] = p.get("state", "unknown")
+            if pid in target_ids:
+                log.info(f"Project {pid} full data: {p}")
         if target_ids.issubset(states.keys()):
             break
         total = resp.get("meta", {}).get("total_pages", 1)
