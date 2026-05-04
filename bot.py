@@ -249,22 +249,18 @@ def webhook():
     return "ok", 200
 
 # ── Startup ────────────────────────────────────────────────────────────────────
-def register_webhook():
-    webhook_url = os.environ.get("WEBHOOK_URL", "https://max-skorozvon-bot.onrender.com")
-    log.info(f"Registering webhook: {webhook_url}")
+def delete_all_webhooks():
+    """Удаляем все webhook подписки чтобы вернуться к polling."""
     try:
         subs = _max("GET", "/subscriptions")
         log.info(f"Current subscriptions: {subs}")
+        for s in (subs.get("subscriptions") or []):
+            url = s.get("url", "")
+            if url:
+                res = _max("DELETE", "/subscriptions", params={"url": url})
+                log.info(f"Deleted subscription {url}: {res}")
     except Exception as e:
-        log.warning(f"Failed to list subscriptions: {e}")
-    try:
-        result = _max("POST", "/subscriptions", json={
-            "url": webhook_url,
-            "update_types": ["message_created", "message_callback"],
-        })
-        log.info(f"Webhook registration result: {result}")
-    except Exception as e:
-        log.error(f"Webhook registration failed: {e}")
+        log.warning(f"Failed to delete subscriptions: {e}")
 
 def polling_loop():
     log.info("Polling fallback started")
@@ -295,7 +291,7 @@ if __name__ == "__main__":
     me = _max("GET", "/me")
     log.info(f"Bot info: {me}")
 
-    register_webhook()
+    delete_all_webhooks()
     threading.Thread(target=polling_loop, daemon=True).start()
 
     port = int(os.environ.get("PORT", 8080))
