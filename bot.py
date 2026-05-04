@@ -96,18 +96,17 @@ def _max(method: str, path: str, **kw):
         log.warning(f"API {method} {path} → {r.status_code}: {r.text[:200]}")
         return {}
 
-def send(chat_id: int, text: str, buttons=None):
+def send(chat_id: int, text: str, buttons=None, user_id: int = None):
     body: dict = {"text": text}
     if buttons:
         body["attachments"] = [{
             "type": "inline_keyboard",
             "payload": {"buttons": buttons},
         }]
-    payload = {
-        "recipient": {"chat_id": chat_id},
-        "body": body,
-    }
-    log.info(f"Sending to chat_id={chat_id}: {payload}")
+    # Try user_id first (works better for DMs), fallback to chat_id
+    recipient = {"user_id": user_id} if user_id else {"chat_id": chat_id}
+    payload = {"recipient": recipient, "body": body}
+    log.info(f"Sending to {recipient}: text={text[:40]!r}")
     result = _max("POST", "/messages", json=payload)
     log.info(f"Send result: {result}")
     return result
@@ -172,12 +171,11 @@ def _build_main_menu():
 # ── Event handlers ─────────────────────────────────────────────────────────────
 def on_message(chat_id: int, user_id: int, text: str):
     if ALLOWED and user_id not in ALLOWED:
-        send(chat_id, "⛔ Нет доступа.")
+        send(chat_id, "⛔ Нет доступа.", user_id=user_id)
         return
-    # Любое сообщение → показываем главное меню
     log.info(f"Message from user_id={user_id} chat_id={chat_id}: {text!r}")
     txt, btns = _build_main_menu()
-    send(chat_id, txt, btns)
+    send(chat_id, txt, btns, user_id=user_id)
 
 
 def on_callback(chat_id: int, user_id: int, callback_id: str, payload: str):
@@ -189,18 +187,18 @@ def on_callback(chat_id: int, user_id: int, callback_id: str, payload: str):
 
     if payload == "projects":
         txt, btns = _build_projects_view()
-        send(chat_id, txt, btns)
+        send(chat_id, txt, btns, user_id=user_id)
         return
 
     if payload == "main_menu":
         txt, btns = _build_main_menu()
-        send(chat_id, txt, btns)
+        send(chat_id, txt, btns, user_id=user_id)
         return
 
     if payload.startswith("stats_"):
         pid = int(payload.split("_", 1)[1])
         pname = next((p["name"] for p in PROJECTS if p["id"] == pid), str(pid))
-        send(chat_id, _build_stats_view(pid, pname))
+        send(chat_id, _build_stats_view(pid, pname), user_id=user_id)
         return
 
     if payload.startswith("start_") or payload.startswith("stop_"):
@@ -218,7 +216,7 @@ def on_callback(chat_id: int, user_id: int, callback_id: str, payload: str):
             return
         time.sleep(1)
         txt, btns = _build_projects_view()
-        send(chat_id, txt, btns)
+        send(chat_id, txt, btns, user_id=user_id)
 
 # ── Main polling loop ──────────────────────────────────────────────────────────
 def main():
