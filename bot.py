@@ -64,11 +64,14 @@ def _skoro(method: str, path: str, **kw):
         method, f"{SKORO_BASE}/api/v2{path}", headers=h, timeout=15, **kw
     )
     r.raise_for_status()
+    if not r.content:
+        return {}
     return r.json()
 
 def get_projects_state() -> dict:
     data = _skoro("GET", "/call_projects").get("data", [])
-    return {p["id"]: p.get("state", "unknown") for p in data}
+    log.info(f"Skorozvon projects raw: {[{'id': p.get('id'), 'state': p.get('state')} for p in data]}")
+    return {int(p["id"]): p.get("state", "unknown") for p in data}
 
 def project_action(pid: int, action: str):
     return _skoro("POST", f"/call_projects/{pid}/{action}")
@@ -111,7 +114,7 @@ def send(chat_id: int, text: str, buttons=None, chat_type: str = "dialog",
 
 def notify_cb(callback_id: str, text: str):
     try:
-        _max("POST", "/answers", json={"callback_id": callback_id, "notification": text})
+        _max("POST", "/answers", params={"callback_id": callback_id}, json={"notification": text})
     except Exception:
         pass
 
