@@ -71,25 +71,22 @@ def _skoro(method: str, path: str, **kw):
 
 def get_projects_state() -> dict:
     states = {}
-    page = 1
     target_ids = {p["id"] for p in PROJECTS}
-    while True:
+    page = 1
+    while page <= 20:
         resp = _skoro("GET", "/call_projects", params={"page": page, "per_page": 50})
         data = resp.get("data", [])
         if not data:
             break
         for p in data:
             pid = int(p["id"])
-            states[pid] = p.get("state", "unknown")
+            states[pid] = p.get("state") or "unknown"
             if pid in target_ids:
-                log.info(f"Project {pid} full data: {p}")
+                log.info(f"Project {pid} full: {p}")
         if target_ids.issubset(states.keys()):
             break
-        total = resp.get("meta", {}).get("total_pages", 1)
-        if page >= total:
-            break
         page += 1
-    log.info(f"Skorozvon our projects: { {pid: states.get(pid) for pid in target_ids} }")
+    log.info(f"Our projects: { {pid: states.get(pid, 'not_found') for pid in target_ids} }")
     return states
 
 def project_action(pid: int, action: str):
