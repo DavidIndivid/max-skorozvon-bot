@@ -103,10 +103,14 @@ def send(chat_id: int, text: str, buttons=None):
             "type": "inline_keyboard",
             "payload": {"buttons": buttons},
         }]
-    return _max("POST", "/messages", json={
+    payload = {
         "recipient": {"chat_id": chat_id},
         "body": body,
-    })
+    }
+    log.info(f"Sending to chat_id={chat_id}: {payload}")
+    result = _max("POST", "/messages", json=payload)
+    log.info(f"Send result: {result}")
+    return result
 
 def notify_cb(callback_id: str, text: str):
     try:
