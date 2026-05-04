@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Max Bot — управление проектами Скорозвон."""
+"""Max Bot — управление проектами Скорозвон. Webhook mode."""
+import json
 import os
 import time
 import logging
-import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import requests
 
@@ -23,7 +23,6 @@ SKORO_KEY  = os.environ["SKORO_API_KEY"]
 SKORO_CID  = os.environ["SKORO_CLIENT_ID"]
 SKORO_CSEC = os.environ["SKORO_CLIENT_SECRET"]
 
-# Если не задано — бот отвечает всем; задайте через ALLOWED_IDS=123,456
 _raw = os.environ.get("ALLOWED_IDS", "")
 ALLOWED: set = set(int(x) for x in _raw.split(",") if x.strip()) if _raw else set()
 
@@ -68,12 +67,10 @@ def _skoro(method: str, path: str, **kw):
     return r.json()
 
 def get_projects_state() -> dict:
-    """id → state ('active' | 'stopped' | ...)"""
     data = _skoro("GET", "/call_projects").get("data", [])
     return {p["id"]: p.get("state", "unknown") for p in data}
 
 def project_action(pid: int, action: str):
-    """action = 'start' | 'stop'"""
     return _skoro("POST", f"/call_projects/{pid}/{action}")
 
 def get_project_stats(pid: int) -> dict:
@@ -81,11 +78,10 @@ def get_project_stats(pid: int) -> dict:
 
 # ── Max Bot API ────────────────────────────────────────────────────────────────
 def _max(method: str, path: str, **kw):
-    params = kw.pop("params", {})
     headers = kw.pop("headers", {})
     headers["Authorization"] = TOKEN
     r = requests.request(
-        method, f"{MAX_BASE}{path}", params=params, headers=headers, timeout=40, **kw
+        method, f"{MAX_BASE}{path}", headers=headers, timeout=40, **kw
     )
     try:
         data = r.json()
@@ -103,26 +99,19 @@ def send(chat_id: int, text: str, buttons=None, user_id: int = None):
             "type": "inline_keyboard",
             "payload": {"buttons": buttons},
         }]
-    # Try user_id first (works better for DMs), fallback to chat_id
     recipient = {"user_id": user_id} if user_id else {"chat_id": chat_id}
-    payload = {"recipient": recipient, "body": body}
-    log.info(f"Sending to {recipient}: text={text[:40]!r}")
-    result = _max("POST", "/messages", json=payload)
-    log.info(f"Send result: {result}")
+    result = _max("POST", "/messages", json={"recipient": recipient, "body": body})
+    log.info(f"Send to {recipient} → {result}")
     return result
 
 def notify_cb(callback_id: str, text: str):
     try:
-        _max("POST", "/answers", json={
-            "callback_id": callback_id,
-            "notification": text,
-        })
+        _max("POST", "/answers", json={"callback_id": callback_id, "notification": text})
     except Exception:
         pass
 
 # ── UI builders ────────────────────────────────────────────────────────────────
 def _build_projects_view():
-    """Возвращает (text, buttons) для меню проектов."""
     try:
         states = get_projects_state()
     except Exception as e:
@@ -146,7 +135,6 @@ def _build_projects_view():
     buttons.append([{"type": "callback", "text": "🔄 Обновить", "payload": "projects"}])
     return "\n".join(lines), buttons
 
-
 def _build_stats_view(pid: int, pname: str):
     try:
         s = get_project_stats(pid)
@@ -160,7 +148,6 @@ def _build_stats_view(pid: int, pname: str):
         )
     except Exception as e:
         return f"❌ Ошибка статистики: {e}"
-
 
 def _build_main_menu():
     return (
@@ -176,7 +163,6 @@ def on_message(chat_id: int, user_id: int, text: str):
     log.info(f"Message from user_id={user_id} chat_id={chat_id}: {text!r}")
     txt, btns = _build_main_menu()
     send(chat_id, txt, btns, user_id=user_id)
-
 
 def on_callback(chat_id: int, user_id: int, callback_id: str, payload: str):
     if ALLOWED and user_id not in ALLOWED:
@@ -218,73 +204,65 @@ def on_callback(chat_id: int, user_id: int, callback_id: str, payload: str):
         txt, btns = _build_projects_view()
         send(chat_id, txt, btns, user_id=user_id)
 
-# ── Main polling loop ──────────────────────────────────────────────────────────
-def main():
-    log.info(f"Token prefix: {TOKEN[:8]}...")
-    me = _max("GET", "/me")
-    log.info(f"Bot started: {me}")
+# ── Process single update ───────────────────────────────────────────────────────
+def handle_update(upd: dict):
+    utype = upd.get("update_type", "")
 
-    marker = None
-    while True:
-        try:
-            params: dict = {"timeout": 30}
-            if marker:
-                params["marker"] = marker
+    if utype == "message_created":
+        msg     = upd.get("message", {})
+        chat_id = msg.get("recipient", {}).get("chat_id")
+        user_id = msg.get("sender", {}).get("user_id", 0)
+        text    = msg.get("body", {}).get("text", "")
+        if chat_id:
+            on_message(chat_id, user_id, text)
 
-            resp   = _max("GET", "/updates", params=params)
-            marker = resp.get("marker", marker)
+    elif utype == "message_callback":
+        cb          = upd.get("callback", {})
+        chat_id     = cb.get("message", {}).get("recipient", {}).get("chat_id")
+        user_id     = cb.get("user", {}).get("user_id", 0)
+        callback_id = cb.get("callback_id", "")
+        payload     = cb.get("payload", "")
+        if chat_id:
+            on_callback(chat_id, user_id, callback_id, payload)
 
-            updates = resp.get("updates", [])
-            if updates:
-                log.info(f"Got {len(updates)} updates")
-            elif "code" in resp:
-                log.warning(f"Updates error: {resp}")
+    else:
+        log.info(f"Unknown update type: {utype}")
 
-            for upd in updates:
-                utype = upd.get("update_type", "")
-
-                if utype == "message_created":
-                    msg     = upd.get("message", {})
-                    chat_id = msg.get("recipient", {}).get("chat_id")
-                    user_id = msg.get("sender", {}).get("user_id", 0)
-                    text    = msg.get("body", {}).get("text", "")
-                    if chat_id:
-                        on_message(chat_id, user_id, text)
-
-                elif utype == "message_callback":
-                    cb          = upd.get("callback", {})
-                    chat_id     = cb.get("message", {}).get("recipient", {}).get("chat_id")
-                    user_id     = cb.get("user", {}).get("user_id", 0)
-                    callback_id = cb.get("callback_id", "")
-                    payload     = cb.get("payload", "")
-                    if chat_id:
-                        on_callback(chat_id, user_id, callback_id, payload)
-
-        except requests.exceptions.Timeout:
-            pass
-        except requests.exceptions.ConnectionError as e:
-            log.warning(f"Connection error: {e}, retry in 10s")
-            time.sleep(10)
-        except Exception as e:
-            log.error(f"Loop error: {e}")
-            time.sleep(5)
-
-
-def _run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-
+# ── Webhook HTTP server ────────────────────────────────────────────────────────
+def make_handler():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"ok")
 
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+            try:
+                upd = json.loads(body)
+                log.info(f"Webhook: {upd.get('update_type')} raw={body[:200]}")
+                handle_update(upd)
+            except Exception as e:
+                log.error(f"Webhook error: {e}, body={body[:200]}")
+
         def log_message(self, *args):
-            pass  # не спамим в лог
+            pass
 
-    HTTPServer(("0.0.0.0", port), Handler).serve_forever()
+    return Handler
 
+def main():
+    log.info(f"Token prefix: {TOKEN[:8]}...")
+    me = _max("GET", "/me")
+    log.info(f"Bot info: {me}")
+
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), make_handler())
+    log.info(f"Webhook server listening on port {port}")
+    server.serve_forever()
 
 if __name__ == "__main__":
-    threading.Thread(target=_run_health_server, daemon=True).start()
     main()
