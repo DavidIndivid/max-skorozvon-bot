@@ -226,14 +226,18 @@ def handle_update(upd: dict):
 
     elif utype == "message_callback":
         cb          = upd.get("callback", {})
+        log.info(f"Full callback: {cb}")
         cb_recip    = cb.get("message", {}).get("recipient", {})
         chat_id     = cb_recip.get("chat_id")
         chat_type   = cb_recip.get("chat_type", "dialog")
         user_id     = cb.get("user", {}).get("user_id", 0)
         callback_id = cb.get("callback_id", "")
         payload     = cb.get("payload", "")
+        log.info(f"Callback: chat_id={chat_id} user_id={user_id} payload={payload!r}")
         if chat_id:
             on_callback(chat_id, chat_type, user_id, callback_id, payload)
+        else:
+            log.warning(f"Callback: no chat_id found in {cb_recip}")
 
     else:
         log.info(f"Unknown update type: {utype}, full: {upd}")
