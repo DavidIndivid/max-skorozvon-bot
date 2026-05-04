@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Max Bot — управление проектами Скорозвон. Webhook mode."""
-import json
+"""Max Bot — управление проектами Скорозвон. Flask webhook mode."""
 import os
 import time
 import logging
-from http.server import BaseHTTPRequestHandler, HTTPServer
+import threading
 import requests
+from flask import Flask, request, jsonify
 
 logging.basicConfig(
     level=logging.INFO,
@@ -207,6 +207,7 @@ def on_callback(chat_id: int, user_id: int, callback_id: str, payload: str):
 # ── Process single update ───────────────────────────────────────────────────────
 def handle_update(upd: dict):
     utype = upd.get("update_type", "")
+    log.info(f"Handling update_type={utype}")
 
     if utype == "message_created":
         msg     = upd.get("message", {})
@@ -226,54 +227,36 @@ def handle_update(upd: dict):
             on_callback(chat_id, user_id, callback_id, payload)
 
     else:
-        log.info(f"Unknown update type: {utype}")
+        log.info(f"Unknown update type: {utype}, full: {upd}")
 
-# ── Webhook HTTP server ────────────────────────────────────────────────────────
-def make_handler():
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
+# ── Flask app ──────────────────────────────────────────────────────────────────
+app = Flask(__name__)
 
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(length) if length else self.rfile.read()
-            log.info(f"POST {self.path} headers={dict(self.headers)} body={body[:500]}")
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
-            if body:
-                try:
-                    upd = json.loads(body)
-                    log.info(f"Webhook update_type={upd.get('update_type')}")
-                    handle_update(upd)
-                except Exception as e:
-                    log.error(f"Webhook parse error: {e}")
+@app.route("/", methods=["GET"])
+def health():
+    return "ok"
 
-        def log_message(self, *args):
-            pass
+@app.route("/", methods=["POST"])
+def webhook():
+    log.info(f"POST / received, content_type={request.content_type}")
+    data = request.get_json(force=True, silent=True)
+    log.info(f"POST body: {data}")
+    if data:
+        try:
+            handle_update(data)
+        except Exception as e:
+            log.error(f"handle_update error: {e}")
+    return "ok", 200
 
-    return Handler
-
+# ── Startup ────────────────────────────────────────────────────────────────────
 def register_webhook():
-    """Регистрируем webhook URL в MAX API."""
     webhook_url = os.environ.get("WEBHOOK_URL", "https://max-skorozvon-bot.onrender.com")
     log.info(f"Registering webhook: {webhook_url}")
-
-    # Список существующих подписок
     try:
         subs = _max("GET", "/subscriptions")
         log.info(f"Current subscriptions: {subs}")
-        for s in subs.get("subscriptions", []) or []:
-            sub_url = s.get("url", "")
-            if sub_url and sub_url != webhook_url:
-                log.info(f"Removing old subscription: {sub_url}")
-                _max("DELETE", "/subscriptions", params={"url": sub_url})
     except Exception as e:
         log.warning(f"Failed to list subscriptions: {e}")
-
-    # Регистрируем новый webhook
     try:
         result = _max("POST", "/subscriptions", json={
             "url": webhook_url,
@@ -283,10 +266,8 @@ def register_webhook():
     except Exception as e:
         log.error(f"Webhook registration failed: {e}")
 
-
 def polling_loop():
-    """Fallback на long-polling если webhook не работает."""
-    log.info("Starting polling loop as fallback")
+    log.info("Polling fallback started")
     marker = None
     while True:
         try:
@@ -309,22 +290,14 @@ def polling_loop():
             log.error(f"Polling error: {e}")
             time.sleep(5)
 
-
-def main():
-    import threading
+if __name__ == "__main__":
     log.info(f"Token prefix: {TOKEN[:8]}...")
     me = _max("GET", "/me")
     log.info(f"Bot info: {me}")
 
     register_webhook()
-
-    # Запускаем polling в фоне как страховку
     threading.Thread(target=polling_loop, daemon=True).start()
 
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), make_handler())
-    log.info(f"Webhook server listening on port {port}")
-    server.serve_forever()
-
-if __name__ == "__main__":
-    main()
+    log.info(f"Starting Flask on port {port}")
+    app.run(host="0.0.0.0", port=port)
