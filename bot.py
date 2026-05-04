@@ -291,8 +291,15 @@ if __name__ == "__main__":
     log.info(f"Bot info: {me}")
 
     delete_all_webhooks()
-    threading.Thread(target=polling_loop, daemon=True).start()
 
+    # Flask в фоновом треде (health + webhook fallback)
     port = int(os.environ.get("PORT", 8080))
-    log.info(f"Starting Flask on port {port}")
-    app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True)
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True),
+        daemon=True,
+    )
+    flask_thread.start()
+    log.info(f"Flask started on port {port}")
+
+    # Polling в главном треде
+    polling_loop()
