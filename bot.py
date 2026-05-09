@@ -96,22 +96,17 @@ def get_projects_state() -> dict:
     return states
 
 def get_project_not_called(pid: int) -> str:
-    """Возвращает кол-во 'Ещё не звонили' из endpoint статистики проекта."""
+    """Возвращает кол-во лидов 'Ещё не звонили' (case_state=uploaded)."""
     try:
-        resp = _skoro("GET", f"/call_projects/{pid}/stats")
-        data = resp.get("data") or resp
-        # Поля которые возвращает Скорозвон в статусе проекта
-        val = (
-            data.get("not_called")
-            or data.get("not_called_count")
-            or data.get("leads_not_called")
-            or data.get("new_leads_count")
-        )
-        if val is not None:
-            return str(val)
-        # Если endpoint вернул данные но ключ другой — логируем для отладки
-        if data:
-            log.info(f"Stats keys for {pid}: {list(data.keys())}")
+        resp = _skoro("GET", "/leads", params={
+            "call_project_id": pid,
+            "case_state": "uploaded",
+            "page": 1,
+            "length": 1,
+        })
+        total = (resp.get("pagination") or {}).get("total")
+        if total is not None:
+            return str(total)
         return "?"
     except Exception as e:
         log.warning(f"Stats error for {pid}: {e}")
