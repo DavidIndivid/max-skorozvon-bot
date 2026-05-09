@@ -381,6 +381,8 @@ def _build_main_menu():
 
 # ── Event handlers ─────────────────────────────────────────────────────────────
 def on_message(chat_id: int, user_id: int, text: str):
+    if "бот" not in text.lower():
+        return
     if ALLOWED and user_id not in ALLOWED:
         send(user_id, "⛔ Нет доступа.")
         return
