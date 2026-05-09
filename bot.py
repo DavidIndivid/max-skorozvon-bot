@@ -26,6 +26,9 @@ SKORO_CSEC = os.environ["SKORO_CLIENT_SECRET"]
 _raw = os.environ.get("ALLOWED_IDS", "")
 ALLOWED: set = set(int(x) for x in _raw.split(",") if x.strip()) if _raw else set()
 
+SKORO_WEB_EMAIL    = os.environ.get("SKORO_WEB_EMAIL", SKORO_USER)
+SKORO_WEB_PASSWORD = os.environ.get("SKORO_WEB_PASSWORD", "")
+
 PROJECTS = [
     {"name": "Планета мебели",   "id": 20000134384},
     {"name": "Стяжка ЮФО",      "id": 20000134398},
@@ -70,29 +73,57 @@ def _skoro_token() -> str:
     return d["access_token"]
 
 def _web_token() -> str:
-    """Веб-JWT через supreme/users/sign_in — нужен для /resurgent/ эндпоинтов."""
+    """Веб-JWT для /resurgent/ эндпоинтов."""
     if _web_cache.get("exp", 0) > time.time() + 60:
         return _web_cache["tok"]
-    r = requests.post(
-        "https://app.skorozvon.ru/supreme/users/sign_in",
-        json={"email": SKORO_USER, "password": SKORO_KEY},
-        timeout=15,
-    )
-    log.info(f"Web login → {r.status_code} {r.text[:300]!r}")
-    r.raise_for_status()
-    tok = r.cookies.get("auth_token") or (r.json().get("auth_token"))
-    if not tok:
-        raise RuntimeError(f"No auth_token in web login response: {r.text[:200]}")
-    import jwt as _jwt
-    try:
-        payload = _jwt.decode(tok, options={"verify_signature": False})
-        exp = payload.get("exp", time.time() + 7200)
-    except Exception:
-        exp = time.time() + 7200
-    _web_cache["tok"] = tok
-    _web_cache["exp"] = exp
-    log.info("Skorozvon: web token refreshed")
-    return tok
+
+    # Если задан вручную через env — используем его
+    static = os.environ.get("SKORO_WEB_TOKEN", "")
+    if static:
+        _web_cache["tok"] = static
+        _web_cache["exp"] = time.time() + 7200
+        log.info("Skorozvon: web token from env")
+        return static
+
+    # Перебираем возможные login-эндпоинты
+    pw = SKORO_WEB_PASSWORD or SKORO_KEY
+    candidates = [
+        ("https://app.skorozvon.ru/supreme/sessions",
+         {"email": SKORO_WEB_EMAIL, "password": pw}),
+        ("https://app.skorozvon.ru/supreme/auth/sign_in",
+         {"email": SKORO_WEB_EMAIL, "password": pw}),
+        ("https://app.skorozvon.ru/supreme/sign_in",
+         {"email": SKORO_WEB_EMAIL, "password": pw}),
+        ("https://api.skorozvon.ru/api/v2/users/sign_in",
+         {"email": SKORO_WEB_EMAIL, "password": pw}),
+        ("https://app.skorozvon.ru/supreme/users",
+         {"email": SKORO_WEB_EMAIL, "password": pw}),
+        # Devise-формат с вложенным user
+        ("https://app.skorozvon.ru/supreme/users/sign_in",
+         {"user": {"email": SKORO_WEB_EMAIL, "password": pw}}),
+    ]
+    for url, body in candidates:
+        try:
+            r = requests.post(url, json=body, timeout=10)
+            log.info(f"Web login {url} → {r.status_code} {r.text[:200]!r}")
+            if r.status_code in (200, 201):
+                try:
+                    d = r.json()
+                except Exception:
+                    d = {}
+                tok = (r.cookies.get("auth_token")
+                       or d.get("auth_token")
+                       or d.get("token")
+                       or d.get("access_token"))
+                if tok and tok.startswith("eyJ"):
+                    _web_cache["tok"] = tok
+                    _web_cache["exp"] = time.time() + 7200
+                    log.info(f"Skorozvon: web token from {url}")
+                    return tok
+        except Exception as e:
+            log.warning(f"Web login {url} error: {e}")
+
+    raise RuntimeError("Не удалось получить веб-токен. Установите SKORO_WEB_TOKEN в Render.")
 
 def _skoro(method: str, path: str, raise_on_4xx: bool = True, **kw):
     h = {"Authorization": f"Bearer {_skoro_token()}"}
