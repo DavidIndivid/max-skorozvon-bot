@@ -41,10 +41,7 @@ STATE_RU = {
     "completed": "завершён",
 }
 
-# last message id per user — для редактирования
 _last_mid: dict[int, str] = {}
-
-# дедупликация — не обрабатывать одно событие дважды
 _seen_updates: set[str] = set()
 
 # ── Skorozvon auth ─────────────────────────────────────────────────────────────
@@ -71,11 +68,14 @@ def _skoro_token() -> str:
     log.info("Skorozvon: token refreshed")
     return d["access_token"]
 
-def _skoro(method: str, path: str, **kw):
+def _skoro(method: str, path: str, raise_on_4xx: bool = True, **kw):
     h = {"Authorization": f"Bearer {_skoro_token()}"}
     r = requests.request(
         method, f"{SKORO_BASE}/api/v2{path}", headers=h, timeout=15, **kw
     )
+    if not raise_on_4xx and 400 <= r.status_code < 500:
+        log.warning(f"Skorozvon {method} {path} → {r.status_code} (ignored): {r.text[:200]}")
+        return {}
     r.raise_for_status()
     try:
         return r.json()
@@ -95,67 +95,33 @@ def get_projects_state() -> dict:
     log.info(f"States: {states}")
     return states
 
-def project_action(pid: int, action: str):
-    # Скорозвон использует pause/start — не stop
-    skoro_action = "pause" if action == "stop" else action
-    result = _skoro("POST", f"/call_projects/{pid}/{skoro_action}", json={})
-    log.info(f"project_action {skoro_action} {pid} → {result}")
-    return result
-
-def get_project_stats(pid: int) -> dict:
-    """Пагинирует звонки проекта, считает по группам + уникальные лиды."""
-    from collections import Counter
-    groups: Counter = Counter()
-    called_lead_ids: set = set()
-
-    page = 1
-    while True:
-        try:
-            resp = _skoro("GET", "/calls", params={
-                "call_project_id": pid,
-                "page": page,
-                "length": 100,
-            })
-        except Exception as e:
-            log.warning(f"Stats calls page {page} error: {e}")
-            break
-        calls = resp.get("data") or []
-        for c in calls:
-            g = c.get("scenario_result_group_title") or ""
-            if g:
-                groups[g] += 1
-            else:
-                groups["_no_group"] += 1
-            lid = c.get("lead_id")
-            if lid:
-                called_lead_ids.add(lid)
-        total_pages = (resp.get("pagination") or {}).get("total_pages", 1)
-        if page >= total_pages or not calls:
-            break
-        page += 1
-
-    total_calls = sum(groups.values())
-
-    # Всего лидов в проекте
+def get_project_not_called(pid: int) -> str:
+    """Возвращает кол-во 'Ещё не звонили' из endpoint статистики проекта."""
     try:
-        r2 = _skoro("GET", "/leads", params={
-            "call_project_id": pid, "page": 1, "length": 1
-        })
-        total_leads = (r2.get("pagination") or {}).get("total", 0)
-    except Exception:
-        total_leads = 0
+        resp = _skoro("GET", f"/call_projects/{pid}/stats")
+        data = resp.get("data") or resp
+        # Поля которые возвращает Скорозвон в статусе проекта
+        val = (
+            data.get("not_called")
+            or data.get("not_called_count")
+            or data.get("leads_not_called")
+            or data.get("new_leads_count")
+        )
+        if val is not None:
+            return str(val)
+        # Если endpoint вернул данные но ключ другой — логируем для отладки
+        if data:
+            log.info(f"Stats keys for {pid}: {list(data.keys())}")
+        return "?"
+    except Exception as e:
+        log.warning(f"Stats error for {pid}: {e}")
+        return "?"
 
-    not_called = max(0, total_leads - len(called_lead_ids))
-
-    return {
-        "reached":    groups.get("Успешные", 0),       # Дозвонились
-        "no_answer":  groups.get("Недозвон", 0),        # Не дозвонились
-        "callback":   groups.get("Промежуточные", 0),   # Позвоним ещё раз
-        "rejected":   groups.get("Неуспешные", 0),      # Отказ
-        "not_called": not_called,                        # Ещё не звонили
-        "total_calls": total_calls,                      # Сделано вызовов
-        "total_leads": total_leads,                      # Всего лидов
-    }
+def project_action(pid: int, action: str) -> bool:
+    """Выполняет start/stop. Скорозвон может вернуть 4xx даже при успехе — игнорируем."""
+    result = _skoro("POST", f"/call_projects/{pid}/{action}", raise_on_4xx=False, json={})
+    log.info(f"project_action {action} {pid} → {result}")
+    return True
 
 # ── Max Bot API ────────────────────────────────────────────────────────────────
 def _max(method: str, path: str, **kw):
@@ -214,7 +180,7 @@ def notify_cb(callback_id: str, text: str):
         pass
 
 # ── UI builders ────────────────────────────────────────────────────────────────
-def _render_projects(states: dict):
+def _render_projects(states: dict, not_called: dict | None = None):
     lines = ["📋 Проекты Скорозвон:\n"]
     buttons = []
     for p in PROJECTS:
@@ -228,11 +194,13 @@ def _render_projects(states: dict):
             icon = "⏸"
             btn_text = f"▶️ Старт — {p['name']}"
             btn_pay  = f"start_{p['id']}"
-        lines.append(f"  {icon} {p['name']} — {state_ru}")
-        buttons.append([
-            {"type": "callback", "text": btn_text,           "payload": btn_pay},
-            {"type": "callback", "text": f"📊 {p['name']}", "payload": f"stats_{p['id']}"},
-        ])
+        nc = ""
+        if not_called:
+            nc_val = not_called.get(p["id"], "")
+            if nc_val:
+                nc = f"  (ещё не звонили: {nc_val})"
+        lines.append(f"  {icon} {p['name']} — {state_ru}{nc}")
+        buttons.append([{"type": "callback", "text": btn_text, "payload": btn_pay}])
     buttons.append([{"type": "callback", "text": "🔄 Обновить", "payload": "projects"}])
     return "\n".join(lines), buttons
 
@@ -241,7 +209,11 @@ def _build_projects_view():
         states = get_projects_state()
     except Exception as e:
         return f"❌ Ошибка Скорозвона:\n{e}", None
-    return _render_projects(states)
+    # Подтягиваем "Ещё не звонили" для каждого проекта
+    not_called = {}
+    for p in PROJECTS:
+        not_called[p["id"]] = get_project_not_called(p["id"])
+    return _render_projects(states, not_called)
 
 def _build_projects_view_with_override(override_pid: int, override_state: str):
     try:
@@ -249,29 +221,16 @@ def _build_projects_view_with_override(override_pid: int, override_state: str):
     except Exception as e:
         return f"❌ Ошибка Скорозвона:\n{e}", None
     states[override_pid] = override_state
-    return _render_projects(states)
+    not_called = {}
+    for p in PROJECTS:
+        not_called[p["id"]] = get_project_not_called(p["id"])
+    return _render_projects(states, not_called)
 
 def _build_main_menu():
     return (
         "Выберите действие:",
         [[{"type": "callback", "text": "📋 Проекты", "payload": "projects"}]]
     )
-
-def _render_stats(pid: int, stats: dict) -> tuple[str, list]:
-    pname = next((p["name"] for p in PROJECTS if p["id"] == pid), str(pid))
-    lines = [
-        f"📊 {pname}\n",
-        f"✅ Дозвонились:        {stats['reached']}",
-        f"📵 Не дозвонились:     {stats['no_answer']}",
-        f"🔄 Позвоним ещё раз:  {stats['callback']}",
-        f"❌ Отказ:              {stats['rejected']}",
-        f"⏳ Ещё не звонили:    {stats['not_called']}",
-        f"",
-        f"📞 Сделано вызовов:   {stats['total_calls']}",
-        f"👥 Всего лидов:       {stats['total_leads']}",
-    ]
-    buttons = [[{"type": "callback", "text": "◀️ К проектам", "payload": "projects"}]]
-    return "\n".join(lines), buttons
 
 # ── Event handlers ─────────────────────────────────────────────────────────────
 def on_message(chat_id: int, user_id: int, text: str):
@@ -299,21 +258,6 @@ def on_callback(user_id: int, callback_id: str, payload: str):
         send_or_edit(user_id, txt, btns)
         return
 
-    if payload.startswith("stats_"):
-        pid = int(payload.split("_", 1)[1])
-        pname = next((p["name"] for p in PROJECTS if p["id"] == pid), str(pid))
-        notify_cb(callback_id, f"⏳ Загружаю статистику {pname}…")
-        try:
-            stats = get_project_stats(pid)
-        except Exception as e:
-            log.error(f"Stats error for {pid}: {e}")
-            send_or_edit(user_id, f"❌ Не удалось получить статистику:\n{e}",
-                         [[{"type": "callback", "text": "◀️ К проектам", "payload": "projects"}]])
-            return
-        txt, btns = _render_stats(pid, stats)
-        send_or_edit(user_id, txt, btns)
-        return
-
     if payload.startswith("start_") or payload.startswith("stop_"):
         action, pid_str = payload.split("_", 1)
         pid   = int(pid_str)
@@ -328,7 +272,7 @@ def on_callback(user_id: int, callback_id: str, payload: str):
             log.error(f"project_action failed: {e}")
             return
         # Небольшая пауза — даём Скорозвону обновить состояние
-        time.sleep(2)
+        time.sleep(3)
         new_state = "active" if action == "start" else "paused"
         txt, btns = _build_projects_view_with_override(pid, new_state)
         send_or_edit(user_id, txt, btns)
@@ -375,12 +319,8 @@ def handle_update(upd: dict):
 # ── Flask app ──────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 
-@app.route("/", methods=["GET"])
+@app.route("/", methods=["GET", "HEAD"])
 def health():
-    return "ok"
-
-@app.route("/", methods=["HEAD"])
-def health_head():
     return "ok"
 
 @app.route("/", methods=["POST"])
