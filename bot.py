@@ -113,13 +113,23 @@ def get_project_not_called(pid: int) -> str:
         log.warning(f"Stats error for {pid}: {e}")
         return "?"
 
-def project_action(pid: int, action: str) -> bool:
-    """Выполняет start/stop через PUT state."""
-    new_state = "active" if action == "start" else "paused"
-    result = _skoro("PUT", f"/call_projects/{pid}", raise_on_4xx=False,
-                    json={"state": new_state})
-    log.info(f"project_action PUT state={new_state} {pid} → {result}")
-    return True
+def project_action(pid: int, action: str) -> str | None:
+    """Выполняет start/stop через реальный эндпоинт веб-интерфейса."""
+    state    = "active" if action == "start" else "paused"
+    substate = "starting" if action == "start" else "stopping"
+    h = {"Authorization": f"Bearer {_skoro_token()}"}
+    r = requests.put(
+        f"{SKORO_BASE}/resurgent/call_projects/{pid}/change_state",
+        headers=h, json={"state": state, "substate": substate}, timeout=15,
+    )
+    log.info(f"project_action {action} {pid} → {r.status_code} {r.text[:300]!r}")
+    if 400 <= r.status_code < 500:
+        try:
+            errs = r.json().get("errors") or []
+            return "; ".join(errs) if errs else r.text[:200]
+        except Exception:
+            return r.text[:200]
+    return None
 
 # ── Max Bot API ────────────────────────────────────────────────────────────────
 def _max(method: str, path: str, **kw):
@@ -251,14 +261,18 @@ def on_callback(user_id: int, callback_id: str, payload: str):
         pid   = int(pid_str)
         pname = next((p["name"] for p in PROJECTS if p["id"] == pid), str(pid))
         try:
-            project_action(pid, action)
-            label = "запускается ▶️" if action == "start" else "останавливается ⏸"
-            notify_cb(callback_id, f"✅ {pname} {label}")
-            log.info(f"Project {pname} ({pid}) {action}ed by user {user_id}")
+            err = project_action(pid, action)
         except Exception as e:
             notify_cb(callback_id, f"❌ Ошибка: {e}")
             log.error(f"project_action failed: {e}")
             return
+        if err:
+            notify_cb(callback_id, f"⚠️ Скорозвон: {err}")
+            log.warning(f"project_action {action} {pname} ({pid}) rejected: {err}")
+        else:
+            label = "запускается ▶️" if action == "start" else "останавливается ⏸"
+            notify_cb(callback_id, f"✅ {pname} {label}")
+            log.info(f"Project {pname} ({pid}) {action}ed by user {user_id}")
         # Пауза — даём Скорозвону обновить состояние, затем показываем реальный статус
         time.sleep(5)
         txt, btns = _build_projects_view()
