@@ -114,16 +114,11 @@ def get_project_not_called(pid: int) -> str:
         return "?"
 
 def project_action(pid: int, action: str) -> bool:
-    """Выполняет start/stop. start пробует resume, затем start."""
-    if action == "start":
-        result = _skoro("POST", f"/call_projects/{pid}/resume", raise_on_4xx=False)
-        log.info(f"project_action resume {pid} → {result}")
-        # Если resume не помог — пробуем start
-        result2 = _skoro("POST", f"/call_projects/{pid}/start", raise_on_4xx=False)
-        log.info(f"project_action start {pid} → {result2}")
-    else:
-        result = _skoro("POST", f"/call_projects/{pid}/{action}", raise_on_4xx=False)
-        log.info(f"project_action {action} {pid} → {result}")
+    """Выполняет start/stop через PUT state."""
+    new_state = "active" if action == "start" else "paused"
+    result = _skoro("PUT", f"/call_projects/{pid}", raise_on_4xx=False,
+                    json={"state": new_state})
+    log.info(f"project_action PUT state={new_state} {pid} → {result}")
     return True
 
 # ── Max Bot API ────────────────────────────────────────────────────────────────
