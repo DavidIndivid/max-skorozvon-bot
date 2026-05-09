@@ -46,6 +46,7 @@ _seen_updates: set[str] = set()
 
 # ── Skorozvon auth ─────────────────────────────────────────────────────────────
 _skoro_cache: dict = {}
+_web_cache:   dict = {}
 
 def _skoro_token() -> str:
     if _skoro_cache.get("exp", 0) > time.time() + 60:
@@ -65,8 +66,33 @@ def _skoro_token() -> str:
     d = r.json()
     _skoro_cache["tok"] = d["access_token"]
     _skoro_cache["exp"] = time.time() + d.get("expires_in", 7200)
-    log.info("Skorozvon: token refreshed")
+    log.info("Skorozvon: API token refreshed")
     return d["access_token"]
+
+def _web_token() -> str:
+    """Веб-JWT через supreme/users/sign_in — нужен для /resurgent/ эндпоинтов."""
+    if _web_cache.get("exp", 0) > time.time() + 60:
+        return _web_cache["tok"]
+    r = requests.post(
+        "https://app.skorozvon.ru/supreme/users/sign_in",
+        json={"email": SKORO_USER, "password": SKORO_KEY},
+        timeout=15,
+    )
+    log.info(f"Web login → {r.status_code} {r.text[:300]!r}")
+    r.raise_for_status()
+    tok = r.cookies.get("auth_token") or (r.json().get("auth_token"))
+    if not tok:
+        raise RuntimeError(f"No auth_token in web login response: {r.text[:200]}")
+    import jwt as _jwt
+    try:
+        payload = _jwt.decode(tok, options={"verify_signature": False})
+        exp = payload.get("exp", time.time() + 7200)
+    except Exception:
+        exp = time.time() + 7200
+    _web_cache["tok"] = tok
+    _web_cache["exp"] = exp
+    log.info("Skorozvon: web token refreshed")
+    return tok
 
 def _skoro(method: str, path: str, raise_on_4xx: bool = True, **kw):
     h = {"Authorization": f"Bearer {_skoro_token()}"}
@@ -114,10 +140,15 @@ def get_project_not_called(pid: int) -> str:
         return "?"
 
 def project_action(pid: int, action: str) -> str | None:
-    """Выполняет start/stop через реальный эндпоинт веб-интерфейса."""
+    """Выполняет start/stop через веб-эндпоинт /resurgent/change_state."""
     state    = "active" if action == "start" else "paused"
     substate = "starting" if action == "start" else "stopping"
-    h = {"Authorization": f"Bearer {_skoro_token()}"}
+    try:
+        tok = _web_token()
+    except Exception as e:
+        log.error(f"Web token failed: {e}")
+        return f"Ошибка авторизации: {e}"
+    h = {"Authorization": f"Bearer {tok}"}
     r = requests.put(
         f"{SKORO_BASE}/resurgent/call_projects/{pid}/change_state",
         headers=h, json={"state": state, "substate": substate}, timeout=15,
