@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Max Bot — управление проектами Скорозвон. Polling mode."""
 import os
+import re
 import time
 import logging
 import threading
@@ -17,7 +18,10 @@ log = logging.getLogger(__name__)
 TOKEN     = os.environ["MAX_BOT_TOKEN"]
 MAX_BASE  = "https://botapi.max.ru"
 
-SKORO_BASE = "https://api.skorozvon.ru"
+SKORO_BASE      = "https://api.skorozvon.ru"
+SKORO_APP_BASE  = "https://app.skorozvon.ru"
+# Шард-специфичный URL (из DevTools): pod5-shard2-lb1.skorozvon.ru
+SKORO_SHARD_URL = os.environ.get("SKORO_SHARD_URL", "https://pod5-shard2-lb1.skorozvon.ru")
 SKORO_USER = os.environ["SKORO_USERNAME"]
 SKORO_KEY  = os.environ["SKORO_API_KEY"]
 SKORO_CID  = os.environ["SKORO_CLIENT_ID"]
@@ -72,58 +76,137 @@ def _skoro_token() -> str:
     log.info("Skorozvon: API token refreshed")
     return d["access_token"]
 
+def _extract_csrf(html: str) -> str | None:
+    """Извлекает CSRF-token из HTML страницы (meta тег)."""
+    m = re.search(r'<meta\s[^>]*name=["\']csrf-token["\'][^>]*content=["\']([^"\']+)["\']', html)
+    if not m:
+        m = re.search(r'<meta\s[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']csrf-token["\']', html)
+    return m.group(1) if m else None
+
+def _cache_web_token(tok: str, expires_in: int = 7200):
+    _web_cache["tok"] = tok
+    _web_cache["exp"] = time.time() + expires_in - 60
+
+def _try_browser_login(pw: str) -> str | None:
+    """Браузерный логин через app.skorozvon.ru — получаем auth_token cookie (Skorozvon JWT)."""
+    sess = requests.Session()
+    sess.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+    })
+
+    # Шаг 1: загружаем страницу — получаем cookies и CSRF-token
+    csrf_token = None
+    for page_url in [f"{SKORO_APP_BASE}/users/sign_in", SKORO_APP_BASE]:
+        try:
+            r = sess.get(page_url, timeout=15, allow_redirects=True)
+            log.info(f"GET {page_url} → {r.status_code} (url={r.url})")
+            if r.status_code == 200 and r.text:
+                csrf_token = _extract_csrf(r.text)
+                if csrf_token:
+                    log.info(f"CSRF token found on {page_url}")
+                    break
+        except Exception as e:
+            log.warning(f"GET {page_url} error: {e}")
+
+    def _check_cookies_for_jwt() -> str | None:
+        for name in ("auth_token", "access_token", "token"):
+            val = sess.cookies.get(name)
+            if val and val.startswith("eyJ"):
+                log.info(f"Found JWT in cookie '{name}'")
+                return val
+        return None
+
+    def _check_response_for_jwt(r: requests.Response) -> str | None:
+        try:
+            d = r.json()
+            for key in ("auth_token", "access_token", "token"):
+                val = d.get(key)
+                if val and val.startswith("eyJ"):
+                    log.info(f"Found JWT in response key '{key}'")
+                    return val
+        except Exception:
+            pass
+        return _check_cookies_for_jwt()
+
+    # Шаг 2: пробуем form-submit на разные login-эндпоинты
+    form_data: dict = {
+        "user[email]":    SKORO_WEB_EMAIL,
+        "user[password]": pw,
+        "utf8":           "✓",
+    }
+    if csrf_token:
+        form_data["authenticity_token"] = csrf_token
+
+    form_endpoints = [
+        f"{SKORO_APP_BASE}/users/sign_in",
+        f"{SKORO_APP_BASE}/sign_in",
+        f"{SKORO_APP_BASE}/login",
+        f"{SKORO_SHARD_URL}/users/sign_in",
+    ]
+    for url in form_endpoints:
+        try:
+            r = sess.post(url, data=form_data, allow_redirects=True, timeout=15,
+                          headers={"Content-Type": "application/x-www-form-urlencoded",
+                                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9"})
+            log.info(f"Form POST {url} → {r.status_code} cookies={list(sess.cookies.keys())}")
+            tok = _check_response_for_jwt(r)
+            if tok:
+                return tok
+        except Exception as e:
+            log.warning(f"Form POST {url} error: {e}")
+
+    # Шаг 3: пробуем JSON-эндпоинты
+    json_endpoints = [
+        (f"{SKORO_APP_BASE}/api/v1/users/sign_in", {"email": SKORO_WEB_EMAIL, "password": pw}),
+        (f"{SKORO_APP_BASE}/api/sessions",          {"email": SKORO_WEB_EMAIL, "password": pw}),
+        (f"{SKORO_APP_BASE}/supreme/sessions",      {"email": SKORO_WEB_EMAIL, "password": pw}),
+        (f"{SKORO_APP_BASE}/supreme/auth",          {"email": SKORO_WEB_EMAIL, "password": pw}),
+        (f"{SKORO_SHARD_URL}/api/v1/sessions",      {"email": SKORO_WEB_EMAIL, "password": pw}),
+    ]
+    for url, body in json_endpoints:
+        try:
+            r = sess.post(url, json=body, allow_redirects=True, timeout=10,
+                          headers={"Accept": "application/json"})
+            log.info(f"JSON POST {url} → {r.status_code} {r.text[:150]!r}")
+            tok = _check_response_for_jwt(r)
+            if tok:
+                return tok
+        except Exception as e:
+            log.warning(f"JSON POST {url} error: {e}")
+
+    return None
+
 def _web_token() -> str:
-    """Веб-JWT для /resurgent/ эндпоинтов."""
+    """Веб-JWT (iss:Skorozvon) для /resurgent/ эндпоинтов."""
     if _web_cache.get("exp", 0) > time.time() + 60:
         return _web_cache["tok"]
 
-    # Если задан вручную через env — используем его
+    # Приоритет 1: вручную заданный токен
     static = os.environ.get("SKORO_WEB_TOKEN", "")
     if static:
-        _web_cache["tok"] = static
-        _web_cache["exp"] = time.time() + 7200
-        log.info("Skorozvon: web token from env")
+        _cache_web_token(static)
+        log.info("Skorozvon: web token from SKORO_WEB_TOKEN env")
         return static
 
-    # Перебираем возможные login-эндпоинты
-    pw = SKORO_WEB_PASSWORD or SKORO_KEY
-    candidates = [
-        ("https://app.skorozvon.ru/supreme/sessions",
-         {"email": SKORO_WEB_EMAIL, "password": pw}),
-        ("https://app.skorozvon.ru/supreme/auth/sign_in",
-         {"email": SKORO_WEB_EMAIL, "password": pw}),
-        ("https://app.skorozvon.ru/supreme/sign_in",
-         {"email": SKORO_WEB_EMAIL, "password": pw}),
-        ("https://api.skorozvon.ru/api/v2/users/sign_in",
-         {"email": SKORO_WEB_EMAIL, "password": pw}),
-        ("https://app.skorozvon.ru/supreme/users",
-         {"email": SKORO_WEB_EMAIL, "password": pw}),
-        # Devise-формат с вложенным user
-        ("https://app.skorozvon.ru/supreme/users/sign_in",
-         {"user": {"email": SKORO_WEB_EMAIL, "password": pw}}),
-    ]
-    for url, body in candidates:
-        try:
-            r = requests.post(url, json=body, timeout=10)
-            log.info(f"Web login {url} → {r.status_code} {r.text[:200]!r}")
-            if r.status_code in (200, 201):
-                try:
-                    d = r.json()
-                except Exception:
-                    d = {}
-                tok = (r.cookies.get("auth_token")
-                       or d.get("auth_token")
-                       or d.get("token")
-                       or d.get("access_token"))
-                if tok and tok.startswith("eyJ"):
-                    _web_cache["tok"] = tok
-                    _web_cache["exp"] = time.time() + 7200
-                    log.info(f"Skorozvon: web token from {url}")
-                    return tok
-        except Exception as e:
-            log.warning(f"Web login {url} error: {e}")
+    pw = SKORO_WEB_PASSWORD
+    if not pw:
+        raise RuntimeError("Установите SKORO_WEB_TOKEN или SKORO_WEB_PASSWORD в Render.")
 
-    raise RuntimeError("Не удалось получить веб-токен. Установите SKORO_WEB_TOKEN в Render.")
+    # Приоритет 2: браузерный логин — получаем Skorozvon JWT (iss:Skorozvon)
+    tok = _try_browser_login(pw)
+    if tok:
+        _cache_web_token(tok)
+        log.info("Skorozvon: web JWT via browser login")
+        return tok
+
+    raise RuntimeError(
+        "Не удалось получить веб-токен автоматически. "
+        "Установите SKORO_WEB_TOKEN в Render env vars вручную."
+    )
 
 def _skoro(method: str, path: str, raise_on_4xx: bool = True, **kw):
     h = {"Authorization": f"Bearer {_skoro_token()}"}
@@ -179,9 +262,13 @@ def project_action(pid: int, action: str) -> str | None:
     except Exception as e:
         log.error(f"Web token failed: {e}")
         return f"Ошибка авторизации: {e}"
-    h = {"Authorization": f"Bearer {tok}"}
+    h = {
+        "Authorization": f"Bearer {tok}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
     r = requests.put(
-        f"{SKORO_BASE}/resurgent/call_projects/{pid}/change_state",
+        f"{SKORO_SHARD_URL}/resurgent/call_projects/{pid}/change_state",
         headers=h, json={"state": state, "substate": substate}, timeout=15,
     )
     log.info(f"project_action {action} {pid} → {r.status_code} {r.text[:300]!r}")
