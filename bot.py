@@ -77,6 +77,7 @@ def _skoro(method: str, path: str, raise_on_4xx: bool = True, **kw):
         log.warning(f"Skorozvon {method} {path} → {r.status_code} (ignored): {r.text[:200]}")
         return {}
     r.raise_for_status()
+    log.info(f"Skorozvon {method} {path} → {r.status_code} body={r.text[:200]!r}")
     try:
         return r.json()
     except Exception:
@@ -113,8 +114,8 @@ def get_project_not_called(pid: int) -> str:
         return "?"
 
 def project_action(pid: int, action: str) -> bool:
-    """Выполняет start/stop. Скорозвон может вернуть 4xx даже при успехе — игнорируем."""
-    result = _skoro("POST", f"/call_projects/{pid}/{action}", raise_on_4xx=False, json={})
+    """Выполняет start/stop."""
+    result = _skoro("POST", f"/call_projects/{pid}/{action}", raise_on_4xx=False)
     log.info(f"project_action {action} {pid} → {result}")
     return True
 
@@ -210,16 +211,6 @@ def _build_projects_view():
         not_called[p["id"]] = get_project_not_called(p["id"])
     return _render_projects(states, not_called)
 
-def _build_projects_view_with_override(override_pid: int, override_state: str):
-    try:
-        states = get_projects_state()
-    except Exception as e:
-        return f"❌ Ошибка Скорозвона:\n{e}", None
-    states[override_pid] = override_state
-    not_called = {}
-    for p in PROJECTS:
-        not_called[p["id"]] = get_project_not_called(p["id"])
-    return _render_projects(states, not_called)
 
 def _build_main_menu():
     return (
@@ -266,10 +257,9 @@ def on_callback(user_id: int, callback_id: str, payload: str):
             notify_cb(callback_id, f"❌ Ошибка: {e}")
             log.error(f"project_action failed: {e}")
             return
-        # Небольшая пауза — даём Скорозвону обновить состояние
-        time.sleep(3)
-        new_state = "active" if action == "start" else "paused"
-        txt, btns = _build_projects_view_with_override(pid, new_state)
+        # Пауза — даём Скорозвону обновить состояние, затем показываем реальный статус
+        time.sleep(5)
+        txt, btns = _build_projects_view()
         send_or_edit(user_id, txt, btns)
 
 # ── Process single update ───────────────────────────────────────────────────────
