@@ -2,6 +2,8 @@
 """Max Bot — управление проектами Скорозвон. Polling mode."""
 import os
 import re
+import json
+import base64
 import time
 import logging
 import threading
@@ -75,6 +77,16 @@ def _skoro_token() -> str:
     _skoro_cache["exp"] = time.time() + d.get("expires_in", 7200)
     log.info("Skorozvon: API token refreshed")
     return d["access_token"]
+
+def _jwt_exp(token: str) -> float:
+    """Возвращает exp из JWT без проверки подписи. 0 если не удалось."""
+    try:
+        payload_b64 = token.split(".")[1]
+        payload_b64 += "=" * (4 - len(payload_b64) % 4)
+        payload = json.loads(base64.b64decode(payload_b64).decode())
+        return float(payload.get("exp", 0))
+    except Exception:
+        return 0
 
 def _extract_csrf(html: str) -> str | None:
     """Извлекает CSRF-token из HTML страницы (meta тег)."""
@@ -185,12 +197,17 @@ def _web_token() -> str:
     if _web_cache.get("exp", 0) > time.time() + 60:
         return _web_cache["tok"]
 
-    # Приоритет 1: вручную заданный токен
+    # Приоритет 1: вручную заданный токен (если не истёк)
     static = os.environ.get("SKORO_WEB_TOKEN", "")
     if static:
-        _cache_web_token(static)
-        log.info("Skorozvon: web token from SKORO_WEB_TOKEN env")
-        return static
+        exp = _jwt_exp(static)
+        ttl = int(exp - time.time())
+        if exp == 0 or ttl > 300:
+            _cache_web_token(static, ttl if ttl > 300 else 7200)
+            log.info(f"Skorozvon: web token from env (ttl={ttl}s)")
+            return static
+        else:
+            log.warning(f"SKORO_WEB_TOKEN истёк {-ttl}s назад — пробуем авто-логин")
 
     pw = SKORO_WEB_PASSWORD
     if not pw:
@@ -203,10 +220,13 @@ def _web_token() -> str:
         log.info("Skorozvon: web JWT via browser login")
         return tok
 
-    raise RuntimeError(
-        "Не удалось получить веб-токен автоматически. "
-        "Установите SKORO_WEB_TOKEN в Render env vars вручную."
+    log.error("Все попытки авто-логина провалились")
+    _notify_admins(
+        "⚠️ Токен Скорозвона истёк и обновить автоматически не удалось.\n"
+        "Зайдите в app.skorozvon.ru → DevTools → Application → Cookies → auth_token\n"
+        "Скопируйте значение и обновите SKORO_WEB_TOKEN в Render."
     )
+    raise RuntimeError("Не удалось получить веб-токен. Обновите SKORO_WEB_TOKEN в Render.")
 
 def _skoro(method: str, path: str, raise_on_4xx: bool = True, **kw):
     h = {"Authorization": f"Bearer {_skoro_token()}"}
@@ -272,13 +292,27 @@ def project_action(pid: int, action: str) -> str | None:
         headers=h, json={"state": state, "substate": substate}, timeout=15,
     )
     log.info(f"project_action {action} {pid} → {r.status_code} {r.text[:300]!r}")
+    if r.status_code == 401:
+        _web_cache.clear()  # токен истёк — сбрасываем, следующий вызов получит новый
+        return "Токен авторизации истёк — обновляется автоматически, повторите через минуту"
     if 400 <= r.status_code < 500:
         try:
             errs = r.json().get("errors") or []
-            return "; ".join(errs) if errs else r.text[:200]
+            msg = "; ".join(errs) if errs else r.text[:200]
         except Exception:
-            return r.text[:200]
+            msg = r.text[:200]
+        return msg or f"Ошибка {r.status_code}"
     return None
+
+def _notify_admins(text: str):
+    """Отправляет сообщение всем разрешённым пользователям."""
+    targets = ALLOWED if ALLOWED else set()
+    for uid in targets:
+        try:
+            _max("POST", "/messages", params={"user_id": uid},
+                 json={"text": text})
+        except Exception as e:
+            log.warning(f"Не удалось уведомить {uid}: {e}")
 
 # ── Max Bot API ────────────────────────────────────────────────────────────────
 def _max(method: str, path: str, **kw):
@@ -497,6 +531,21 @@ def delete_all_webhooks():
     except Exception as e:
         log.warning(f"Failed to delete subscriptions: {e}")
 
+def token_refresh_loop():
+    """Каждые 30 минут проверяет и обновляет веб-токен заранее."""
+    while True:
+        time.sleep(1800)
+        try:
+            exp = _web_cache.get("exp", 0)
+            ttl = int(exp - time.time())
+            if ttl < 1800:  # меньше 30 минут — обновляем
+                log.info(f"Проактивное обновление веб-токена (ttl={ttl}s)")
+                _web_cache.clear()
+                _web_token()
+                log.info("Веб-токен обновлён заранее")
+        except Exception as e:
+            log.warning(f"Фоновое обновление токена не удалось: {e}")
+
 def polling_loop():
     log.info("Polling started")
     marker = None
@@ -535,5 +584,9 @@ if __name__ == "__main__":
     )
     flask_thread.start()
     log.info(f"Flask started on port {port}")
+
+    refresh_thread = threading.Thread(target=token_refresh_loop, daemon=True)
+    refresh_thread.start()
+    log.info("Token refresh thread started")
 
     polling_loop()
