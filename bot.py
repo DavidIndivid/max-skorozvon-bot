@@ -99,8 +99,19 @@ def _cache_web_token(tok: str, expires_in: int = 7200):
     _web_cache["tok"] = tok
     _web_cache["exp"] = time.time() + expires_in - 60
 
+def _jwt_payload(token: str) -> dict:
+    try:
+        b = token.split(".")[1]
+        b += "=" * (4 - len(b) % 4)
+        return json.loads(base64.b64decode(b).decode())
+    except Exception:
+        return {}
+
+def _is_skorozvon_jwt(token: str) -> bool:
+    return _jwt_payload(token).get("iss") == "Skorozvon"
+
 def _try_browser_login(pw: str) -> str | None:
-    """Браузерный логин через app.skorozvon.ru — получаем auth_token cookie (Skorozvon JWT)."""
+    """Пробует все известные способы получить Skorozvon JWT (iss:Skorozvon)."""
     sess = requests.Session()
     sess.headers.update({
         "User-Agent": (
@@ -110,86 +121,152 @@ def _try_browser_login(pw: str) -> str | None:
         "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
     })
 
-    # Шаг 1: загружаем страницу — получаем cookies и CSRF-token
+    def _pick_jwt(r: requests.Response) -> str | None:
+        """Ищет JWT в теле ответа и куках. Предпочитает iss:Skorozvon."""
+        candidates = []
+        try:
+            d = r.json()
+            for key in ("auth_token", "access_token", "token", "web_token"):
+                val = d.get(key) or (d.get("data") or {}).get(key)
+                if val and val.startswith("eyJ"):
+                    candidates.append(val)
+        except Exception:
+            pass
+        for name in ("auth_token", "access_token", "token"):
+            val = sess.cookies.get(name)
+            if val and val.startswith("eyJ"):
+                candidates.append(val)
+        # предпочитаем Skorozvon JWT
+        for t in candidates:
+            p = _jwt_payload(t)
+            log.info(f"  JWT candidate iss={p.get('iss')!r} exp={p.get('exp')}")
+            if p.get("iss") == "Skorozvon":
+                return t
+        return candidates[0] if candidates else None
+
+    # ── Шаг 1: OAuth2 на app.skorozvon.ru (вдруг другой JWT чем api.skorozvon.ru) ──
+    for oauth_url in [f"{SKORO_APP_BASE}/oauth/token", f"{SKORO_BASE}/oauth/token"]:
+        for data in [
+            {"grant_type": "password", "username": SKORO_WEB_EMAIL, "password": pw,
+             "client_id": SKORO_CID, "client_secret": SKORO_CSEC},
+            {"grant_type": "password", "username": SKORO_WEB_EMAIL, "password": pw},
+        ]:
+            try:
+                r = requests.post(oauth_url, data=data, timeout=15)
+                log.info(f"OAuth {oauth_url} → {r.status_code} {r.text[:250]!r}")
+                if r.status_code == 200:
+                    tok = _pick_jwt(r)
+                    if tok and _is_skorozvon_jwt(tok):
+                        return tok
+                    # сохраняем Indicrm JWT для попытки обмена ниже
+                    if tok:
+                        indicrm_tok = tok
+                        break
+            except Exception as e:
+                log.warning(f"OAuth {oauth_url} error: {e}")
+        else:
+            indicrm_tok = None
+            continue
+        break
+    else:
+        indicrm_tok = None
+
+    # ── Шаг 2: обмен Indicrm JWT → Skorozvon JWT через /auth_tokens ──
+    if indicrm_tok:
+        for url in [
+            f"{SKORO_SHARD_URL}/auth_tokens",
+            f"{SKORO_APP_BASE}/auth_tokens",
+            f"{SKORO_BASE}/auth_tokens",
+        ]:
+            try:
+                r = requests.post(
+                    url,
+                    headers={"Authorization": f"Bearer {indicrm_tok}",
+                             "Accept": "application/json"},
+                    json={"authenticity_token": "", "utf8": "✓"},
+                    timeout=10,
+                )
+                log.info(f"auth_tokens {url} → {r.status_code} {r.text[:300]!r}")
+                if r.status_code in (200, 201):
+                    tok = _pick_jwt(r)
+                    if tok and _is_skorozvon_jwt(tok):
+                        return tok
+            except Exception as e:
+                log.warning(f"auth_tokens {url} error: {e}")
+
+    # ── Шаг 3: загружаем страницу логина — ищем CSRF и action формы ──
     csrf_token = None
-    for page_url in [f"{SKORO_APP_BASE}/users/sign_in", SKORO_APP_BASE]:
+    form_action = None
+    for page_url in [f"{SKORO_APP_BASE}/users/sign_in", SKORO_APP_BASE,
+                     f"{SKORO_SHARD_URL}/users/sign_in"]:
         try:
             r = sess.get(page_url, timeout=15, allow_redirects=True)
-            log.info(f"GET {page_url} → {r.status_code} (url={r.url})")
+            body_snippet = r.text[:800].replace("\n", " ")
+            log.info(f"GET {page_url} → {r.status_code} url={r.url} body={body_snippet!r}")
             if r.status_code == 200 and r.text:
                 csrf_token = _extract_csrf(r.text)
+                m = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', r.text)
+                if m:
+                    form_action = m.group(1)
+                    log.info(f"Form action: {form_action}")
                 if csrf_token:
-                    log.info(f"CSRF token found on {page_url}")
+                    log.info(f"CSRF: {csrf_token[:30]}...")
                     break
         except Exception as e:
             log.warning(f"GET {page_url} error: {e}")
 
-    def _check_cookies_for_jwt() -> str | None:
-        for name in ("auth_token", "access_token", "token"):
-            val = sess.cookies.get(name)
-            if val and val.startswith("eyJ"):
-                log.info(f"Found JWT in cookie '{name}'")
-                return val
-        return None
-
-    def _check_response_for_jwt(r: requests.Response) -> str | None:
-        try:
-            d = r.json()
-            for key in ("auth_token", "access_token", "token"):
-                val = d.get(key)
-                if val and val.startswith("eyJ"):
-                    log.info(f"Found JWT in response key '{key}'")
-                    return val
-        except Exception:
-            pass
-        return _check_cookies_for_jwt()
-
-    # Шаг 2: пробуем form-submit на разные login-эндпоинты
-    form_data: dict = {
-        "user[email]":    SKORO_WEB_EMAIL,
-        "user[password]": pw,
-        "utf8":           "✓",
-    }
+    # ── Шаг 4: form POST ──
+    form_data: dict = {"user[email]": SKORO_WEB_EMAIL, "user[password]": pw, "utf8": "✓"}
     if csrf_token:
         form_data["authenticity_token"] = csrf_token
 
-    form_endpoints = [
+    form_urls = list({  # set для дедупликации, потом list
+        form_action or "",
         f"{SKORO_APP_BASE}/users/sign_in",
         f"{SKORO_APP_BASE}/sign_in",
         f"{SKORO_APP_BASE}/login",
         f"{SKORO_SHARD_URL}/users/sign_in",
-    ]
-    for url in form_endpoints:
+        f"{SKORO_SHARD_URL}/sign_in",
+    } - {""})
+    for url in form_urls:
         try:
             r = sess.post(url, data=form_data, allow_redirects=True, timeout=15,
                           headers={"Content-Type": "application/x-www-form-urlencoded",
-                                   "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9"})
-            log.info(f"Form POST {url} → {r.status_code} cookies={list(sess.cookies.keys())}")
-            tok = _check_response_for_jwt(r)
-            if tok:
+                                   "Accept": "text/html,application/xhtml+xml"})
+            log.info(f"Form POST {url} → {r.status_code} "
+                     f"cookies={list(sess.cookies.keys())} body={r.text[:200]!r}")
+            tok = _pick_jwt(r)
+            if tok and _is_skorozvon_jwt(tok):
                 return tok
         except Exception as e:
             log.warning(f"Form POST {url} error: {e}")
 
-    # Шаг 3: пробуем JSON-эндпоинты
+    # ── Шаг 5: JSON POST ──
+    creds_full = {"email": SKORO_WEB_EMAIL, "password": pw}
+    creds_user = {"user": {"email": SKORO_WEB_EMAIL, "password": pw}}
     json_endpoints = [
-        (f"{SKORO_APP_BASE}/api/v1/users/sign_in", {"email": SKORO_WEB_EMAIL, "password": pw}),
-        (f"{SKORO_APP_BASE}/api/sessions",          {"email": SKORO_WEB_EMAIL, "password": pw}),
-        (f"{SKORO_APP_BASE}/supreme/sessions",      {"email": SKORO_WEB_EMAIL, "password": pw}),
-        (f"{SKORO_APP_BASE}/supreme/auth",          {"email": SKORO_WEB_EMAIL, "password": pw}),
-        (f"{SKORO_SHARD_URL}/api/v1/sessions",      {"email": SKORO_WEB_EMAIL, "password": pw}),
+        (f"{SKORO_APP_BASE}/api/v1/users/sign_in",    creds_full),
+        (f"{SKORO_APP_BASE}/api/v1/sessions",          creds_full),
+        (f"{SKORO_APP_BASE}/api/sessions",             creds_full),
+        (f"{SKORO_APP_BASE}/supreme/users/sign_in",    creds_user),
+        (f"{SKORO_APP_BASE}/supreme/sessions",         creds_full),
+        (f"{SKORO_APP_BASE}/supreme/auth",             creds_full),
+        (f"{SKORO_SHARD_URL}/api/v1/sessions",         creds_full),
+        (f"{SKORO_SHARD_URL}/resurgent/sessions",      creds_full),
+        (f"{SKORO_BASE}/api/v2/users/sign_in",         creds_full),
     ]
     for url, body in json_endpoints:
         try:
             r = sess.post(url, json=body, allow_redirects=True, timeout=10,
                           headers={"Accept": "application/json"})
-            log.info(f"JSON POST {url} → {r.status_code} {r.text[:150]!r}")
-            tok = _check_response_for_jwt(r)
-            if tok:
+            log.info(f"JSON POST {url} → {r.status_code} {r.text[:200]!r}")
+            tok = _pick_jwt(r)
+            if tok and _is_skorozvon_jwt(tok):
                 return tok
         except Exception as e:
             log.warning(f"JSON POST {url} error: {e}")
 
+    log.error("Все попытки авто-логина завершились неудачей")
     return None
 
 def _web_token() -> str:
