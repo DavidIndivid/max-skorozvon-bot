@@ -50,7 +50,8 @@ STATE_RU = {
     "completed": "завершён",
 }
 
-_last_mid: dict[int, str] = {}
+_last_mid: dict[int, str] = {}      # chat_id → last message id
+_user_chat: dict[int, int] = {}     # user_id → last active chat_id
 _seen_updates: set[str] = set()
 
 # ── Skorozvon auth ─────────────────────────────────────────────────────────────
@@ -382,11 +383,12 @@ def project_action(pid: int, action: str) -> str | None:
     return None
 
 def _notify_admins(text: str):
-    """Отправляет сообщение всем разрешённым пользователям."""
+    """Отправляет сообщение всем разрешённым пользователям в их активный чат."""
     targets = ALLOWED if ALLOWED else set()
     for uid in targets:
+        chat_id = _user_chat.get(uid, uid)
         try:
-            _max("POST", "/messages", params={"user_id": uid},
+            _max("POST", "/messages", params={"chat_id": chat_id},
                  json={"text": text})
         except Exception as e:
             log.warning(f"Не удалось уведомить {uid}: {e}")
@@ -416,29 +418,29 @@ def _build_body(text: str, buttons=None) -> dict:
         }]
     return body
 
-def send(user_id: int, text: str, buttons=None) -> str | None:
-    result = _max("POST", "/messages", params={"user_id": user_id},
+def send(chat_id: int, text: str, buttons=None) -> str | None:
+    result = _max("POST", "/messages", params={"chat_id": chat_id},
                   json=_build_body(text, buttons))
     mid = result.get("message", {}).get("body", {}).get("mid")
     if mid:
-        _last_mid[user_id] = mid
-    log.info(f"Sent to {user_id}, mid={mid}")
+        _last_mid[chat_id] = mid
+    log.info(f"Sent to chat_id={chat_id}, mid={mid}")
     return mid
 
-def edit(mid: str, user_id: int, text: str, buttons=None):
+def edit(mid: str, text: str, buttons=None):
     result = _max("PUT", "/messages", params={"message_id": mid},
                   json=_build_body(text, buttons))
     log.info(f"Edited mid={mid}: {result}")
 
-def send_or_edit(user_id: int, text: str, buttons=None):
-    mid = _last_mid.get(user_id)
+def send_or_edit(chat_id: int, text: str, buttons=None):
+    mid = _last_mid.get(chat_id)
     if mid:
         try:
-            edit(mid, user_id, text, buttons)
+            edit(mid, text, buttons)
             return
         except Exception as e:
             log.warning(f"Edit failed ({e}), sending new")
-    send(user_id, text, buttons)
+    send(chat_id, text, buttons)
 
 def notify_cb(callback_id: str, text: str):
     try:
@@ -495,27 +497,30 @@ def on_message(chat_id: int, user_id: int, text: str):
     if "бот" not in text.lower():
         return
     if ALLOWED and user_id not in ALLOWED:
-        send(user_id, "⛔ Нет доступа.")
+        send(chat_id, "⛔ Нет доступа.")
         return
-    log.info(f"Message from user_id={user_id}: {text!r}")
+    log.info(f"Message from user_id={user_id} chat_id={chat_id}: {text!r}")
+    _user_chat[user_id] = chat_id
     txt, btns = _build_main_menu()
-    send(user_id, txt, btns)
+    send(chat_id, txt, btns)
 
 def on_callback(user_id: int, callback_id: str, payload: str):
     if ALLOWED and user_id not in ALLOWED:
         notify_cb(callback_id, "⛔ Нет доступа")
         return
 
-    log.info(f"Callback from user_id={user_id}: {payload!r}")
+    # Используем последний активный чат (группа или личка)
+    chat_id = _user_chat.get(user_id, user_id)
+    log.info(f"Callback from user_id={user_id} chat_id={chat_id}: {payload!r}")
 
     if payload == "projects":
         txt, btns = _build_projects_view()
-        send_or_edit(user_id, txt, btns)
+        send_or_edit(chat_id, txt, btns)
         return
 
     if payload == "main_menu":
         txt, btns = _build_main_menu()
-        send_or_edit(user_id, txt, btns)
+        send_or_edit(chat_id, txt, btns)
         return
 
     if payload.startswith("start_") or payload.startswith("stop_"):
@@ -535,10 +540,9 @@ def on_callback(user_id: int, callback_id: str, payload: str):
             label = "запускается ▶️" if action == "start" else "останавливается ⏸"
             notify_cb(callback_id, f"✅ {pname} {label}")
             log.info(f"Project {pname} ({pid}) {action}ed by user {user_id}")
-        # Пауза — даём Скорозвону обновить состояние, затем показываем реальный статус
         time.sleep(5)
         txt, btns = _build_projects_view()
-        send_or_edit(user_id, txt, btns)
+        send_or_edit(chat_id, txt, btns)
 
 # ── Process single update ───────────────────────────────────────────────────────
 def handle_update(upd: dict):
