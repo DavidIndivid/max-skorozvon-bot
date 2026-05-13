@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Max Bot — управление проектами Скорозвон. Polling mode."""
+"""Max Bot — управление проектами Скорозвон. Webhook mode (не засыпает)."""
 import os
 import re
 import json
 import base64
 import time
 import logging
-import threading
 import requests
 from flask import Flask, request
 
@@ -22,7 +21,6 @@ MAX_BASE  = "https://botapi.max.ru"
 
 SKORO_BASE      = "https://api.skorozvon.ru"
 SKORO_APP_BASE  = "https://app.skorozvon.ru"
-# Шард-специфичный URL (из DevTools): pod5-shard2-lb1.skorozvon.ru
 SKORO_SHARD_URL = os.environ.get("SKORO_SHARD_URL", "https://pod5-shard2-lb1.skorozvon.ru")
 SKORO_USER = os.environ["SKORO_USERNAME"]
 SKORO_KEY  = os.environ["SKORO_API_KEY"]
@@ -80,7 +78,6 @@ def _skoro_token() -> str:
     return d["access_token"]
 
 def _jwt_exp(token: str) -> float:
-    """Возвращает exp из JWT без проверки подписи. 0 если не удалось."""
     try:
         payload_b64 = token.split(".")[1]
         payload_b64 += "=" * (4 - len(payload_b64) % 4)
@@ -90,7 +87,6 @@ def _jwt_exp(token: str) -> float:
         return 0
 
 def _extract_csrf(html: str) -> str | None:
-    """Извлекает CSRF-token из HTML страницы (meta тег)."""
     m = re.search(r'<meta\s[^>]*name=["\']csrf-token["\'][^>]*content=["\']([^"\']+)["\']', html)
     if not m:
         m = re.search(r'<meta\s[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']csrf-token["\']', html)
@@ -112,7 +108,6 @@ def _is_skorozvon_jwt(token: str) -> bool:
     return _jwt_payload(token).get("iss") == "Skorozvon"
 
 def _try_browser_login(pw: str) -> str | None:
-    """Пробует все известные способы получить Skorozvon JWT (iss:Skorozvon)."""
     sess = requests.Session()
     sess.headers.update({
         "User-Agent": (
@@ -123,7 +118,6 @@ def _try_browser_login(pw: str) -> str | None:
     })
 
     def _pick_jwt(r: requests.Response) -> str | None:
-        """Ищет JWT в теле ответа и куках. Предпочитает iss:Skorozvon."""
         candidates = []
         try:
             d = r.json()
@@ -137,7 +131,6 @@ def _try_browser_login(pw: str) -> str | None:
             val = sess.cookies.get(name)
             if val and val.startswith("eyJ"):
                 candidates.append(val)
-        # предпочитаем Skorozvon JWT
         for t in candidates:
             p = _jwt_payload(t)
             log.info(f"  JWT candidate iss={p.get('iss')!r} exp={p.get('exp')}")
@@ -145,7 +138,6 @@ def _try_browser_login(pw: str) -> str | None:
                 return t
         return candidates[0] if candidates else None
 
-    # ── Шаг 1: OAuth2 на app.skorozvon.ru (вдруг другой JWT чем api.skorozvon.ru) ──
     for oauth_url in [f"{SKORO_APP_BASE}/oauth/token", f"{SKORO_BASE}/oauth/token"]:
         for data in [
             {"grant_type": "password", "username": SKORO_WEB_EMAIL, "password": pw,
@@ -159,7 +151,6 @@ def _try_browser_login(pw: str) -> str | None:
                     tok = _pick_jwt(r)
                     if tok and _is_skorozvon_jwt(tok):
                         return tok
-                    # сохраняем Indicrm JWT для попытки обмена ниже
                     if tok:
                         indicrm_tok = tok
                         break
@@ -172,7 +163,6 @@ def _try_browser_login(pw: str) -> str | None:
     else:
         indicrm_tok = None
 
-    # ── Шаг 2: обмен Indicrm JWT → Skorozvon JWT через /auth_tokens ──
     if indicrm_tok:
         for url in [
             f"{SKORO_SHARD_URL}/auth_tokens",
@@ -195,7 +185,6 @@ def _try_browser_login(pw: str) -> str | None:
             except Exception as e:
                 log.warning(f"auth_tokens {url} error: {e}")
 
-    # ── Шаг 3: загружаем страницу логина — ищем CSRF и action формы ──
     csrf_token = None
     form_action = None
     for page_url in [f"{SKORO_APP_BASE}/users/sign_in", SKORO_APP_BASE,
@@ -216,12 +205,11 @@ def _try_browser_login(pw: str) -> str | None:
         except Exception as e:
             log.warning(f"GET {page_url} error: {e}")
 
-    # ── Шаг 4: form POST ──
     form_data: dict = {"user[email]": SKORO_WEB_EMAIL, "user[password]": pw, "utf8": "✓"}
     if csrf_token:
         form_data["authenticity_token"] = csrf_token
 
-    form_urls = list({  # set для дедупликации, потом list
+    form_urls = list({
         form_action or "",
         f"{SKORO_APP_BASE}/users/sign_in",
         f"{SKORO_APP_BASE}/sign_in",
@@ -242,7 +230,6 @@ def _try_browser_login(pw: str) -> str | None:
         except Exception as e:
             log.warning(f"Form POST {url} error: {e}")
 
-    # ── Шаг 5: JSON POST ──
     creds_full = {"email": SKORO_WEB_EMAIL, "password": pw}
     creds_user = {"user": {"email": SKORO_WEB_EMAIL, "password": pw}}
     json_endpoints = [
@@ -271,11 +258,9 @@ def _try_browser_login(pw: str) -> str | None:
     return None
 
 def _web_token() -> str:
-    """Веб-JWT (iss:Skorozvon) для /resurgent/ эндпоинтов."""
     if _web_cache.get("exp", 0) > time.time() + 60:
         return _web_cache["tok"]
 
-    # Приоритет 1: вручную заданный токен (если не истёк)
     static = os.environ.get("SKORO_WEB_TOKEN", "")
     if static:
         exp = _jwt_exp(static)
@@ -291,7 +276,6 @@ def _web_token() -> str:
     if not pw:
         raise RuntimeError("Установите SKORO_WEB_TOKEN или SKORO_WEB_PASSWORD в Render.")
 
-    # Приоритет 2: браузерный логин — получаем Skorozvon JWT (iss:Skorozvon)
     tok = _try_browser_login(pw)
     if tok:
         _cache_web_token(tok)
@@ -335,7 +319,6 @@ def get_projects_state() -> dict:
     return states
 
 def get_project_not_called(pid: int) -> str:
-    """Возвращает кол-во лидов 'Ещё не звонили' (case_state=uploaded)."""
     try:
         resp = _skoro("GET", "/leads", params={
             "call_project_id": pid,
@@ -352,7 +335,6 @@ def get_project_not_called(pid: int) -> str:
         return "?"
 
 def project_action(pid: int, action: str) -> str | None:
-    """Выполняет start/stop через веб-эндпоинт /resurgent/change_state."""
     state    = "active" if action == "start" else "paused"
     substate = "starting" if action == "start" else "stopping"
     try:
@@ -371,7 +353,7 @@ def project_action(pid: int, action: str) -> str | None:
     )
     log.info(f"project_action {action} {pid} → {r.status_code} {r.text[:300]!r}")
     if r.status_code == 401:
-        _web_cache.clear()  # токен истёк — сбрасываем, следующий вызов получит новый
+        _web_cache.clear()
         return "Токен авторизации истёк — обновляется автоматически, повторите через минуту"
     if 400 <= r.status_code < 500:
         try:
@@ -383,7 +365,6 @@ def project_action(pid: int, action: str) -> str | None:
     return None
 
 def _notify_admins(text: str):
-    """Отправляет сообщение всем разрешённым пользователям в их активный чат."""
     targets = ALLOWED if ALLOWED else set()
     for uid in targets:
         chat_id = _user_chat.get(uid, uid)
@@ -479,12 +460,10 @@ def _build_projects_view():
         states = get_projects_state()
     except Exception as e:
         return f"❌ Ошибка Скорозвона:\n{e}", None
-    # Подтягиваем "Ещё не звонили" для каждого проекта
     not_called = {}
     for p in PROJECTS:
         not_called[p["id"]] = get_project_not_called(p["id"])
     return _render_projects(states, not_called)
-
 
 def _build_main_menu():
     return (
@@ -509,7 +488,6 @@ def on_callback(user_id: int, callback_id: str, payload: str):
         notify_cb(callback_id, "⛔ Нет доступа")
         return
 
-    # Используем последний активный чат (группа или личка)
     chat_id = _user_chat.get(user_id, user_id)
     log.info(f"Callback from user_id={user_id} chat_id={chat_id}: {payload!r}")
 
@@ -583,14 +561,17 @@ def handle_update(upd: dict):
     else:
         log.info(f"Unknown update type: {utype}")
 
-# ── Flask app ──────────────────────────────────────────────────────────────────
+# ── Flask + Webhook ────────────────────────────────────────────────────────────
 app = Flask(__name__)
+
+WEBHOOK_PATH = "/telegram-webhook"
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "") + WEBHOOK_PATH
 
 @app.route("/", methods=["GET", "HEAD"])
 def health():
     return "ok"
 
-@app.route("/", methods=["POST"])
+@app.route(WEBHOOK_PATH, methods=["POST"])
 def webhook():
     data = request.get_json(force=True, silent=True)
     if data:
@@ -600,8 +581,28 @@ def webhook():
             log.error(f"handle_update error: {e}")
     return "ok", 200
 
-# ── Startup ────────────────────────────────────────────────────────────────────
-def delete_all_webhooks():
+def token_refresh_loop():
+    """Каждые 30 минут проверяет и обновляет веб-токен заранее."""
+    import threading
+    while True:
+        time.sleep(1800)
+        try:
+            exp = _web_cache.get("exp", 0)
+            ttl = int(exp - time.time())
+            if ttl < 1800:
+                log.info(f"Проактивное обновление веб-токена (ttl={ttl}s)")
+                _web_cache.clear()
+                _web_token()
+                log.info("Веб-токен обновлён заранее")
+        except Exception as e:
+            log.warning(f"Фоновое обновление токена не удалось: {e}")
+
+if __name__ == "__main__":
+    log.info(f"Token prefix: {TOKEN[:8]}...")
+    me = _max("GET", "/me")
+    log.info(f"Bot info: {me}")
+
+    # Удаляем все старые подписки (polling)
     try:
         subs = _max("GET", "/subscriptions")
         log.info(f"Current subscriptions: {subs}")
@@ -612,62 +613,26 @@ def delete_all_webhooks():
     except Exception as e:
         log.warning(f"Failed to delete subscriptions: {e}")
 
-def token_refresh_loop():
-    """Каждые 30 минут проверяет и обновляет веб-токен заранее."""
-    while True:
-        time.sleep(1800)
-        try:
-            exp = _web_cache.get("exp", 0)
-            ttl = int(exp - time.time())
-            if ttl < 1800:  # меньше 30 минут — обновляем
-                log.info(f"Проактивное обновление веб-токена (ttl={ttl}s)")
-                _web_cache.clear()
-                _web_token()
-                log.info("Веб-токен обновлён заранее")
-        except Exception as e:
-            log.warning(f"Фоновое обновление токена не удалось: {e}")
-
-def polling_loop():
-    log.info("Polling started")
-    marker = None
-    while True:
-        try:
-            params: dict = {"timeout": 30}
-            if marker:
-                params["marker"] = marker
-            resp = _max("GET", "/updates", params=params)
-            marker = resp.get("marker", marker)
-            updates = resp.get("updates") or []
-            log.info(f"Poll: marker={marker} updates={len(updates)}")
-            for upd in updates:
-                handle_update(upd)
-        except requests.exceptions.Timeout:
-            log.info("Poll timeout, retrying")
-            time.sleep(1)
-        except requests.exceptions.ConnectionError as e:
-            log.warning(f"Connection error: {e}")
-            time.sleep(10)
-        except Exception as e:
-            log.error(f"Polling error: {e}", exc_info=True)
-            time.sleep(5)
-
-if __name__ == "__main__":
-    log.info(f"Token prefix: {TOKEN[:8]}...")
-    me = _max("GET", "/me")
-    log.info(f"Bot info: {me}")
-
-    delete_all_webhooks()
-
     port = int(os.environ.get("PORT", 8080))
-    flask_thread = threading.Thread(
-        target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False, threaded=True),
-        daemon=True,
-    )
-    flask_thread.start()
-    log.info(f"Flask started on port {port}")
 
+    # Запускаем тред для обновления токена
+    import threading
     refresh_thread = threading.Thread(target=token_refresh_loop, daemon=True)
     refresh_thread.start()
     log.info("Token refresh thread started")
 
-    polling_loop()
+    # Устанавливаем webhook
+    if WEBHOOK_URL:
+        try:
+            from requests import post as rp
+            resp = rp(
+                f"{MAX_BASE}/subscriptions",
+                headers={"Authorization": TOKEN},
+                json={"url": WEBHOOK_URL},
+                timeout=15,
+            )
+            log.info(f"Webhook set: {WEBHOOK_URL} → {resp.status_code} {resp.text[:200]}")
+        except Exception as e:
+            log.warning(f"Failed to set webhook: {e}")
+
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
