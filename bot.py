@@ -597,6 +597,44 @@ def token_refresh_loop():
         except Exception as e:
             log.warning(f"Фоновое обновление токена не удалось: {e}")
 
+
+def _export_scheduler():
+    """Запускает export.main() в 10:30, 15:00 и 20:00 МСК."""
+    from zoneinfo import ZoneInfo
+    from datetime import datetime, timedelta
+
+    MSK = ZoneInfo("Europe/Moscow")
+    SCHEDULE_TIMES = [(10, 30), (15, 0), (20, 0)]
+
+    while True:
+        now = datetime.now(MSK)
+        next_run = None
+        for h, m in SCHEDULE_TIMES:
+            candidate = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if candidate > now:
+                next_run = candidate
+                break
+        if next_run is None:
+            first = SCHEDULE_TIMES[0]
+            next_run = (now + timedelta(days=1)).replace(
+                hour=first[0], minute=first[1], second=0, microsecond=0
+            )
+
+        sleep_secs = (next_run - datetime.now(MSK)).total_seconds()
+        log.info(f"Следующий экспорт: {next_run.strftime('%Y-%m-%d %H:%M МСК')} "
+                 f"(через {int(sleep_secs // 60)} мин)")
+        time.sleep(max(sleep_secs, 1))
+
+        log.info("Запускаем плановый экспорт...")
+        _notify_admins("⏰ Запускаю плановый экспорт Скорозвон → таблицы...")
+        try:
+            import export as _export
+            _export.main()
+            _notify_admins("✅ Экспорт завершён")
+        except Exception as exc:
+            log.error(f"Ошибка планового экспорта: {exc}", exc_info=True)
+            _notify_admins(f"❌ Ошибка экспорта: {exc}")
+
 if __name__ == "__main__":
     log.info(f"Token prefix: {TOKEN[:8]}...")
     me = _max("GET", "/me")
@@ -620,6 +658,11 @@ if __name__ == "__main__":
     refresh_thread = threading.Thread(target=token_refresh_loop, daemon=True)
     refresh_thread.start()
     log.info("Token refresh thread started")
+
+    # Запускаем тред планового экспорта (10:30, 15:00, 20:00 МСК)
+    export_thread = threading.Thread(target=_export_scheduler, daemon=True)
+    export_thread.start()
+    log.info("Export scheduler thread started")
 
     # Устанавливаем webhook
     if WEBHOOK_URL:
