@@ -10,6 +10,7 @@
   4. Существующие строки → обновляем только ячейки E (статус) и F (комментарий)
   5. Новые строки → пишем точечно в A:F, не трогаем G+ (партнёрские данные)
 """
+import gc
 import config
 import sheets
 import upload as upload_module
@@ -341,7 +342,7 @@ def main():
             log.debug(f"Ошибка results лида {phone_to_lead[ph]}: {e}")
             return ph, "", ""
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=3) as executor:
         futures = {executor.submit(_fetch_status_and_comment, ph): ph for ph in phones_to_query}
         for future in as_completed(futures):
             ph, status, comment = future.result()
@@ -352,6 +353,9 @@ def main():
     has_comment = sum(1 for v in skoro_by_phone.values() if v["comment"])
     log.info(f"✓ Телефонов: статус={has_status}, комментарий={has_comment} "
              f"(запрошено лидов: {len(phones_to_query)})")
+
+    del phone_to_lead, phones_to_query
+    gc.collect()
 
     # ── 3. Роутинг: распределяем по 5 таблицам ────────────────────────────────
     log.info("▶ Шаг 3: роутинг по тегу...")
@@ -378,6 +382,9 @@ def main():
     log.info(f"✓ Распределено: {summary}")
     if no_route:
         log.warning(f"⚠ Без маршрута (неизвестный тег): {no_route}")
+
+    del master_by_phone
+    gc.collect()
 
     # ── 4. Записываем в каждую таблицу ────────────────────────────────────────
     log.info("\n" + "=" * 80)

@@ -628,12 +628,20 @@ def _export_scheduler():
         log.info("Запускаем плановый экспорт...")
         _notify_admins("⏰ Запускаю плановый экспорт Скорозвон → таблицы...")
         try:
-            import export as _export
-            _export.main()
-            _notify_admins("✅ Экспорт завершён")
+            import subprocess, sys
+            result = subprocess.run(
+                [sys.executable, "export.py"],
+                timeout=3600,
+            )
+            if result.returncode == 0:
+                _notify_admins("✅ Экспорт завершён")
+            else:
+                _notify_admins(f"❌ Экспорт завершился с ошибкой (код {result.returncode})")
+        except subprocess.TimeoutExpired:
+            _notify_admins("❌ Экспорт превысил таймаут (1 час)")
         except Exception as exc:
-            log.error(f"Ошибка планового экспорта: {exc}", exc_info=True)
-            _notify_admins(f"❌ Ошибка экспорта: {exc}")
+            log.error(f"Ошибка запуска экспорта: {exc}", exc_info=True)
+            _notify_admins(f"❌ Ошибка запуска экспорта: {exc}")
 
 if __name__ == "__main__":
     log.info(f"Token prefix: {TOKEN[:8]}...")
