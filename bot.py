@@ -34,11 +34,12 @@ SKORO_WEB_EMAIL    = os.environ.get("SKORO_WEB_EMAIL", SKORO_USER)
 SKORO_WEB_PASSWORD = os.environ.get("SKORO_WEB_PASSWORD", "")
 
 PROJECTS = [
-    {"name": "Планета мебели",   "id": 20000134384},
-    {"name": "Стяжка ЮФО",      "id": 20000134398},
-    {"name": "Ремонт Краснодар", "id": 20000134402},
-    {"name": "Ремонт Побережье", "id": 20000134407},
-    {"name": "Китай FLS",        "id": 20000134411},
+    {"name": "Планета мебели",      "id": 20000134384},
+    {"name": "Стяжка ЮФО",          "id": 20000134398},
+    {"name": "Ремонт Краснодар",    "id": 20000134402},
+    {"name": "Ремонт Побережье",    "id": 20000134407},
+    {"name": "Китай FLS",           "id": 20000134411},
+    {"name": "СобственникиГарантия","id": 20000136188},
 ]
 
 STATE_RU = {
@@ -452,7 +453,6 @@ def _render_projects(states: dict, not_called: dict | None = None):
                 nc = f"  (ещё не звонили: {nc_val})"
         lines.append(f"  {icon} {p['name']} — {state_ru}{nc}")
         buttons.append([{"type": "callback", "text": btn_text, "payload": btn_pay}])
-    buttons.append([{"type": "callback", "text": "🔄 Обновить", "payload": "projects"}])
     return "\n".join(lines), buttons
 
 def _build_projects_view():
