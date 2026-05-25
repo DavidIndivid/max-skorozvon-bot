@@ -17,13 +17,17 @@ def _load_google_creds() -> dict:
     raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
     if not raw:
         return {}
+    # Убираем все пробелы/переносы — Render и copy-paste часто их добавляют
+    clean = "".join(raw.split())
     try:
-        return json.loads(base64.b64decode(raw).decode())
+        return json.loads(base64.b64decode(clean).decode("utf-8"))
     except Exception:
-        try:
-            return json.loads(raw)
-        except Exception:
-            return {}
+        pass
+    # Fallback: может быть передан сырой JSON (не base64)
+    try:
+        return json.loads(raw)
+    except Exception:
+        return {}
 
 GOOGLE_SERVICE_ACCOUNT_INFO: dict = _load_google_creds()
 GOOGLE_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
