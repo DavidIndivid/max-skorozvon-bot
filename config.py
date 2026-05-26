@@ -76,7 +76,7 @@ INPUT_SPREADSHEETS = [
         "columns": {"phone": 2, "created": 3, "status": 4, "comment": 5, "project": 1}
     },
     {
-        "name": "Ремонт Краснодар",
+        "name": "Ремонт Гарантия",
         "client_keyword": "Ремонт Краснодар",
         "spreadsheet_id": "1ONIVfkAP4zDD_iOtvmn8Xnfj5VrcENm80IkVA5Rlzpk",
         "sheet_name": "База Краснодар ",
