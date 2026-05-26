@@ -27,12 +27,17 @@ log = setup_logging("export_final")
 LOOKBACK_DAYS = 14
 MSK = ZoneInfo("Europe/Moscow")
 
+_svc_cache = None
+
 
 def _svc():
-    creds = service_account.Credentials.from_service_account_info(
-        config.GOOGLE_SERVICE_ACCOUNT_INFO, scopes=config.GOOGLE_SCOPES
-    )
-    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+    global _svc_cache
+    if _svc_cache is None:
+        creds = service_account.Credentials.from_service_account_info(
+            config.GOOGLE_SERVICE_ACCOUNT_INFO, scopes=config.GOOGLE_SCOPES
+        )
+        _svc_cache = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    return _svc_cache
 
 
 def get_call_status(call: dict) -> str:
@@ -393,6 +398,7 @@ def main():
 
     for kw, cfg in valid_cfgs.items():
         process_project(cfg, data_by_table.get(kw, {}), skoro_by_phone)
+        gc.collect()
 
     log.info("\n" + "=" * 80)
     log.info("ЗАВЕРШЕНО")

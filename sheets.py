@@ -11,11 +11,17 @@ import config
 log = logging.getLogger(__name__)
 
 
+_svc_cache = None
+
+
 def _service():
-    creds = service_account.Credentials.from_service_account_info(
-        config.GOOGLE_SERVICE_ACCOUNT_INFO, scopes=config.GOOGLE_SCOPES,
-    )
-    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+    global _svc_cache
+    if _svc_cache is None:
+        creds = service_account.Credentials.from_service_account_info(
+            config.GOOGLE_SERVICE_ACCOUNT_INFO, scopes=config.GOOGLE_SCOPES,
+        )
+        _svc_cache = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    return _svc_cache
 
 
 def _col_letter(idx: int) -> str:
